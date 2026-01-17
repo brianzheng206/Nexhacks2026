@@ -6,6 +6,7 @@
 //
 
 import SwiftUI
+import RoomPlan
 
 struct ScanView: View {
     let laptopIP: String
@@ -113,7 +114,7 @@ struct ScanView: View {
                 statusMessage = "Disconnected - please reconnect"
             }
         }
-        .onChange(of: scanController.isScanning) { _ in
+        .onChange(of: scanController.isScanning) { oldValue, newValue in
             updateStatus()
         }
     }

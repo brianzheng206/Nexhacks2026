@@ -89,18 +89,13 @@ struct PairingView: View {
             }
             .padding()
             .navigationBarHidden(true)
-            .background(
-                NavigationLink(
-                    destination: ScanView(laptopIP: laptopIP, token: token),
-                    isActive: $navigateToScan
-                ) {
-                    EmptyView()
-                }
-            )
+            .navigationDestination(isPresented: $navigateToScan) {
+                ScanView(laptopIP: laptopIP, token: token)
+            }
             .sheet(isPresented: $showQRScanner) {
                 QRScannerView(scannedToken: $scannedToken, scannedHost: $scannedHost)
             }
-            .onChange(of: scannedToken) { newToken in
+            .onChange(of: scannedToken) { oldValue, newToken in
                 if let token = newToken {
                     self.token = token
                     // If host was also scanned, use it; otherwise prompt for IP

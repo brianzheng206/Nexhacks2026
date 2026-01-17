@@ -12,7 +12,7 @@ import AudioToolbox
 struct QRScannerView: UIViewControllerRepresentable {
     @Binding var scannedToken: String?
     @Binding var scannedHost: String?
-    @Environment(\.presentationMode) var presentationMode
+    @Environment(\.dismiss) var dismiss
     
     func makeUIViewController(context: Context) -> QRScannerViewController {
         let controller = QRScannerViewController()
@@ -38,7 +38,7 @@ struct QRScannerView: UIViewControllerRepresentable {
         func didScanQRCode(token: String?, host: String?) {
             parent.scannedToken = token
             parent.scannedHost = host
-            parent.presentationMode.wrappedValue.dismiss()
+            parent.dismiss()
         }
     }
 }
