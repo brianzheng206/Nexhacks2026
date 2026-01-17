@@ -23,7 +23,7 @@ class WSClient: ObservableObject {
     var onInstruction: ((String) -> Void)?
     var onStatus: ((String) -> Void)?
     
-    private var currentLaptopIP: String?
+    var currentLaptopIP: String?
     private var currentToken: String?
     private var helloCompletion: ((Bool, String?) -> Void)?
     private var isWaitingForHelloAck: Bool = false
@@ -168,14 +168,28 @@ class WSClient: ObservableObject {
     
     func sendJPEGFrame(_ data: Data) {
         guard isConnected else {
-            print("[WSClient] Cannot send frame: not connected")
+            // Silently skip if not connected (avoid log spam)
             return
         }
         
         let message = URLSessionWebSocketTask.Message.data(data)
         webSocketTask?.send(message) { error in
             if let error = error {
-                print("[WSClient] Error sending JPEG frame: \(error)")
+                print("[WSClient] Error sending JPEG frame (\(data.count) bytes): \(error)")
+            }
+        }
+    }
+    
+    func sendMessage(_ jsonString: String) {
+        guard isConnected else {
+            print("[WSClient] Cannot send message: not connected")
+            return
+        }
+        
+        let message = URLSessionWebSocketTask.Message.string(jsonString)
+        webSocketTask?.send(message) { error in
+            if let error = error {
+                print("[WSClient] Error sending message: \(error)")
             }
         }
     }

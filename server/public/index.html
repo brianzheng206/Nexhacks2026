@@ -67,6 +67,12 @@
             object-fit: contain;
         }
 
+        .preview-panel canvas {
+            width: 100%;
+            height: 100%;
+            background: #000;
+        }
+
         .preview-placeholder {
             color: #666;
             font-size: 1.2em;
@@ -224,15 +230,19 @@
 <body>
     <div class="header">
         <h1>🏠 RoomScan Remote - Operator Console</h1>
-        <div class="token-display">
-            <span class="status-indicator" id="statusIndicator"></span>
-            <span id="tokenDisplay">No session token</span>
+        <div style="display: flex; align-items: center;">
+            <div class="token-display">
+                <span class="status-indicator" id="statusIndicator"></span>
+                <span id="tokenDisplay">No session token</span>
+            </div>
+            <span id="phoneStatus" class="phone-status disconnected" style="display: none;">Phone: Disconnected</span>
         </div>
     </div>
 
-    <div class="main-content">
+        <div class="main-content">
         <div class="preview-panel">
             <img id="previewImage" style="display: none;" alt="Live Preview" />
+            <canvas id="floorplanCanvas" style="display: none; width: 100%; height: 100%;"></canvas>
             <div id="previewPlaceholder" class="preview-placeholder">
                 Waiting for scan preview...
             </div>
@@ -243,8 +253,8 @@
                 <h3>Getting Started</h3>
                 <p id="instructionsText">
                     To start scanning, you need a session token. 
-                    <a href="/new.html">Create a new session</a> or visit 
-                    <a href="/new.html">/new.html</a> to get started.
+                    <a href="/pair.html">Go to pairing page</a> to generate a QR code, or 
+                    <a href="/new.html">create a new session</a> manually.
                 </p>
             </div>
 
@@ -365,22 +375,34 @@
 
             ws.onmessage = (event) => {
                 if (event.data instanceof Blob || event.data instanceof ArrayBuffer) {
-                    // Binary JPEG frame
-                    const blob = new Blob([event.data], { type: 'image/jpeg' });
-                    const url = URL.createObjectURL(blob);
-                    const img = document.getElementById('previewImage');
-                    const placeholder = document.getElementById('previewPlaceholder');
-                    
-                    img.src = url;
-                    img.style.display = 'block';
-                    placeholder.style.display = 'none';
-                    
-                    // Revoke old URL to prevent memory leak
-                    img.onload = () => {
-                        if (img.src.startsWith('blob:')) {
-                            URL.revokeObjectURL(img.src);
+                    // Binary JPEG frame - update preview image
+                    try {
+                        const blob = new Blob([event.data], { type: 'image/jpeg' });
+                        const url = URL.createObjectURL(blob);
+                        const img = document.getElementById('previewImage');
+                        const placeholder = document.getElementById('previewPlaceholder');
+                        
+                        if (img && placeholder) {
+                            // Revoke old URL before setting new one to prevent memory leak
+                            const oldUrl = img.src;
+                            img.src = url;
+                            img.style.display = 'block';
+                            placeholder.style.display = 'none';
+                            
+                            // Revoke old URL after a short delay to ensure new image is loaded
+                            if (oldUrl && oldUrl.startsWith('blob:')) {
+                                setTimeout(() => {
+                                    try {
+                                        URL.revokeObjectURL(oldUrl);
+                                    } catch (e) {
+                                        // Ignore errors when revoking
+                                    }
+                                }, 100);
+                            }
                         }
-                    };
+                    } catch (error) {
+                        console.error('Error handling binary frame:', error);
+                    }
                 } else {
                     // Text message
                     try {
@@ -393,6 +415,9 @@
                         // Handle room_update (room stats)
                         else if (data.type === 'room_update') {
                             updateLog(data);
+                            if (data.walls && Array.isArray(data.walls)) {
+                                drawFloorplan(data.walls);
+                            }
                         }
                         // Handle instruction messages
                         else if (data.type === 'instruction') {
@@ -400,7 +425,18 @@
                         }
                         // Handle status messages
                         else if (data.type === 'status') {
-                            updateStatus(data.message || data.text || JSON.stringify(data));
+                            const statusValue = data.value || data.message || data.text || JSON.stringify(data);
+                            updateStatus(statusValue);
+                            // If upload is complete, the export_ready should follow from server
+                            if (data.value === 'upload_complete') {
+                                console.log('Upload complete, waiting for export_ready...');
+                            }
+                            // Handle phone connection status
+                            if (data.value === 'phone_connected') {
+                                updatePhoneStatus(true);
+                            } else if (data.value === 'phone_disconnected') {
+                                updatePhoneStatus(false);
+                            }
                         }
                         // Handle export_ready
                         else if (data.type === 'export_ready') {
@@ -486,6 +522,135 @@
             console.log('Status:', message);
         }
 
+        function updatePhoneStatus(connected) {
+            const phoneStatusEl = document.getElementById('phoneStatus');
+            if (phoneStatusEl) {
+                phoneStatusEl.textContent = connected ? 'Phone: Connected' : 'Phone: Disconnected';
+                phoneStatusEl.className = 'phone-status ' + (connected ? 'connected' : 'disconnected');
+                phoneStatusEl.style.display = 'block';
+            }
+        }
+
+        let floorplanCanvas = null;
+        let floorplanCtx = null;
+
+        function initFloorplanCanvas() {
+            const canvas = document.getElementById('floorplanCanvas');
+            if (!canvas) return;
+            
+            floorplanCanvas = canvas;
+            floorplanCtx = canvas.getContext('2d');
+            
+            // Set canvas size to match container
+            const container = canvas.parentElement;
+            canvas.width = container.clientWidth;
+            canvas.height = container.clientHeight;
+        }
+
+        function drawFloorplan(walls) {
+            if (!floorplanCtx || !floorplanCanvas) {
+                initFloorplanCanvas();
+                if (!floorplanCtx) return;
+            }
+
+            const canvas = floorplanCanvas;
+            const ctx = floorplanCtx;
+            
+            // Clear canvas
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            
+            // Show canvas, hide placeholder and preview image
+            canvas.style.display = 'block';
+            document.getElementById('previewImage').style.display = 'none';
+            document.getElementById('previewPlaceholder').style.display = 'none';
+            
+            if (!walls || walls.length === 0) return;
+            
+            // Find bounds to center and scale the floorplan
+            let minX = Infinity, maxX = -Infinity;
+            let minZ = Infinity, maxZ = -Infinity;
+            
+            const wallSegments = [];
+            
+            // Process each wall
+            for (const wall of walls) {
+                if (!wall.transform || !Array.isArray(wall.transform) || wall.transform.length !== 16) {
+                    continue;
+                }
+                
+                // Extract transform matrix (4x4, column-major)
+                const m = wall.transform;
+                
+                // Extract position (translation) from transform matrix (column 3, rows 0-2)
+                const x = m[12]; // translation X
+                const z = m[14]; // translation Z (Y is up in RoomPlan)
+                
+                // Extract dimensions
+                const width = wall.dimensions?.width || 0;
+                const length = wall.dimensions?.length || 0;
+                
+                // Extract rotation from transform matrix (first 3x3)
+                // For top-down view, we need the rotation around Y axis (yaw)
+                const m00 = m[0], m02 = m[8]; // first row, X and Z components
+                const angle = Math.atan2(m02, m00); // rotation around Y
+                
+                // Calculate wall endpoints (wall extends along its local X axis)
+                const halfLength = length / 2;
+                const cosA = Math.cos(angle);
+                const sinA = Math.sin(angle);
+                
+                const end1X = x - halfLength * cosA;
+                const end1Z = z - halfLength * sinA;
+                const end2X = x + halfLength * cosA;
+                const end2Z = z + halfLength * sinA;
+                
+                wallSegments.push({
+                    x1: end1X, z1: end1Z,
+                    x2: end2X, z2: end2Z
+                });
+                
+                // Update bounds
+                minX = Math.min(minX, end1X, end2X);
+                maxX = Math.max(maxX, end1X, end2X);
+                minZ = Math.min(minZ, end1Z, end2Z);
+                maxZ = Math.max(maxZ, end1Z, end2Z);
+            }
+            
+            if (minX === Infinity || wallSegments.length === 0) return;
+            
+            // Calculate scale and offset to fit canvas
+            const rangeX = maxX - minX || 1;
+            const rangeZ = maxZ - minZ || 1;
+            const padding = 40;
+            const scale = Math.min(
+                (canvas.width - padding * 2) / rangeX,
+                (canvas.height - padding * 2) / rangeZ
+            );
+            
+            const centerX = (minX + maxX) / 2;
+            const centerZ = (minZ + maxZ) / 2;
+            const offsetX = canvas.width / 2 - centerX * scale;
+            const offsetZ = canvas.height / 2 - centerZ * scale;
+            
+            // Draw walls
+            ctx.strokeStyle = '#667eea';
+            ctx.lineWidth = 4;
+            ctx.lineCap = 'round';
+            ctx.lineJoin = 'round';
+            
+            for (const wall of wallSegments) {
+                const x1 = wall.x1 * scale + offsetX;
+                const z1 = wall.z1 * scale + offsetZ;
+                const x2 = wall.x2 * scale + offsetX;
+                const z2 = wall.z2 * scale + offsetZ;
+                
+                ctx.beginPath();
+                ctx.moveTo(x1, z1);
+                ctx.lineTo(x2, z2);
+                ctx.stroke();
+            }
+        }
+
         function showDownloadLink(downloadUrl) {
             const downloadLink = document.getElementById('downloadLink');
             downloadLink.href = downloadUrl;
@@ -494,6 +659,14 @@
 
         // Initialize UI
         updateUI();
+        
+        // Initialize floorplan canvas
+        initFloorplanCanvas();
+        
+        // Resize canvas on window resize
+        window.addEventListener('resize', () => {
+            initFloorplanCanvas();
+        });
 
         // Connect WebSocket if token is available
         if (token) {

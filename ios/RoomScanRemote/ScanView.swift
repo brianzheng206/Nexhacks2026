@@ -12,8 +12,16 @@ struct ScanView: View {
     let token: String
     
     @StateObject private var scanController = ScanController()
+    
+    init(laptopIP: String, token: String) {
+        self.laptopIP = laptopIP
+        self.token = token
+    }
     @State private var statusMessage: String = "Connected"
     @State private var showLocalControls: Bool = true
+    @State private var showReconnectAlert: Bool = false
+    @State private var reconnectError: String?
+    @State private var wasConnected: Bool = false
     
     var body: some View {
         VStack(spacing: 30) {
@@ -48,7 +56,7 @@ struct ScanView: View {
                             .foregroundColor(.white)
                             .cornerRadius(10)
                     }
-                    .disabled(scanController.isScanning)
+                    .disabled(scanController.isScanning || !WSClient.shared.isConnected || !RoomCaptureSession.isSupported)
                     
                     Button(action: stopScan) {
                         Text("Stop Scan")
@@ -85,7 +93,18 @@ struct ScanView: View {
         }
         .padding()
         .navigationBarTitleDisplayMode(.inline)
+        .alert("Connection Lost", isPresented: $showReconnectAlert) {
+            Button("Reconnect") {
+                reconnect()
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text(reconnectError ?? "WebSocket connection failed. Would you like to reconnect?")
+        }
         .onAppear {
+            // Set token in scan controller
+            scanController.token = token
+            
             setupWebSocketHandlers()
             updateStatus()
             
@@ -118,7 +137,17 @@ struct ScanView: View {
         // Update status when connection state changes
         wsClient.onConnectionStateChanged = { isConnected in
             DispatchQueue.main.async {
-                statusMessage = isConnected ? "Connected" : "Disconnected"
+                if isConnected {
+                    statusMessage = "Connected"
+                    wasConnected = true
+                } else {
+                    statusMessage = "Disconnected"
+                    // Show reconnect alert if we were previously connected
+                    if wasConnected {
+                        showReconnectAlert = true
+                        reconnectError = "Connection lost. Please reconnect."
+                    }
+                }
             }
         }
         
@@ -134,9 +163,28 @@ struct ScanView: View {
         }
     }
     
+    private func reconnect() {
+        let wsClient = WSClient.shared
+        wsClient.connect(laptopIP: laptopIP, token: token) { success, error in
+            DispatchQueue.main.async {
+                if success {
+                    statusMessage = "Connected"
+                    showReconnectAlert = false
+                    reconnectError = nil
+                    wasConnected = true
+                } else {
+                    reconnectError = error ?? "Reconnection failed"
+                    showReconnectAlert = true
+                }
+            }
+        }
+    }
+    
     private func updateStatus() {
         if scanController.isScanning {
             statusMessage = "Scanning"
+        } else if !RoomCaptureSession.isSupported {
+            statusMessage = "RoomPlan not supported"
         } else if WSClient.shared.isConnected {
             statusMessage = "Connected"
         } else {

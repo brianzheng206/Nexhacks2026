@@ -3,7 +3,7 @@
 <plist version="1.0">
 <dict>
 	<key>NSCameraUsageDescription</key>
-	<string>RoomScan Remote needs camera access to scan rooms using RoomPlan.</string>
+	<string>RoomScan Remote needs camera access to scan QR codes for pairing and to scan rooms using RoomPlan.</string>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>RoomScan Remote needs local network access to connect to the laptop server for streaming room scans.</string>
 	<key>UIApplicationSceneManifest</key>

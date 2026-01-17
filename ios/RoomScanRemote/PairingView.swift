@@ -13,6 +13,9 @@ struct PairingView: View {
     @State private var isConnecting: Bool = false
     @State private var errorMessage: String?
     @State private var navigateToScan: Bool = false
+    @State private var showQRScanner: Bool = false
+    @State private var scannedToken: String?
+    @State private var scannedHost: String?
     
     var body: some View {
         NavigationView {
@@ -48,6 +51,21 @@ struct PairingView: View {
                         .padding(.horizontal)
                 }
                 
+                Button(action: { showQRScanner = true }) {
+                    HStack {
+                        Image(systemName: "qrcode.viewfinder")
+                            .font(.system(size: 20))
+                        Text("Scan QR Code")
+                            .fontWeight(.semibold)
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding()
+                    .background(Color.green)
+                    .foregroundColor(.white)
+                    .cornerRadius(10)
+                }
+                .padding(.top, 10)
+                
                 Button(action: connect) {
                     HStack {
                         if isConnecting {
@@ -65,7 +83,7 @@ struct PairingView: View {
                     .cornerRadius(10)
                 }
                 .disabled(isConnecting || laptopIP.isEmpty || token.isEmpty)
-                .padding(.top, 20)
+                .padding(.top, 10)
                 
                 Spacer()
             }
@@ -79,6 +97,18 @@ struct PairingView: View {
                     EmptyView()
                 }
             )
+            .sheet(isPresented: $showQRScanner) {
+                QRScannerView(scannedToken: $scannedToken, scannedHost: $scannedHost)
+            }
+            .onChange(of: scannedToken) { newToken in
+                if let token = newToken {
+                    self.token = token
+                    // If host was also scanned, use it; otherwise prompt for IP
+                    if let host = scannedHost {
+                        self.laptopIP = host
+                    }
+                }
+            }
         }
     }
     

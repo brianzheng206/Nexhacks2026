@@ -1,0 +1,194 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Pairing - RoomScan Remote</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            padding: 20px;
+        }
+
+        .container {
+            background: white;
+            border-radius: 20px;
+            padding: 40px;
+            max-width: 600px;
+            width: 100%;
+            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+            text-align: center;
+        }
+
+        h1 {
+            color: #333;
+            margin-bottom: 10px;
+            font-size: 2em;
+        }
+
+        .subtitle {
+            color: #666;
+            margin-bottom: 30px;
+            font-size: 1em;
+        }
+
+        .qr-container {
+            margin: 30px 0;
+        }
+
+        .qr-container img {
+            max-width: 100%;
+            border-radius: 10px;
+            box-shadow: 0 5px 15px rgba(0, 0, 0, 0.1);
+        }
+
+        .info-section {
+            background: #f5f5f5;
+            padding: 20px;
+            border-radius: 10px;
+            margin: 20px 0;
+            text-align: left;
+        }
+
+        .info-section h3 {
+            color: #333;
+            margin-bottom: 10px;
+            font-size: 1.1em;
+        }
+
+        .info-item {
+            margin: 10px 0;
+            color: #555;
+        }
+
+        .info-item strong {
+            color: #333;
+        }
+
+        .token-display {
+            background: #e7f3ff;
+            padding: 15px;
+            border-radius: 10px;
+            margin: 20px 0;
+            word-break: break-all;
+            font-family: 'Courier New', monospace;
+            font-size: 0.9em;
+            color: #333;
+        }
+
+        .button {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border: none;
+            padding: 15px 30px;
+            font-size: 1.1em;
+            border-radius: 10px;
+            cursor: pointer;
+            width: 100%;
+            margin-top: 20px;
+            transition: transform 0.2s, box-shadow 0.2s;
+            text-decoration: none;
+            display: inline-block;
+        }
+
+        .button:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 5px 20px rgba(102, 126, 234, 0.4);
+        }
+
+        .status {
+            margin-top: 20px;
+            padding: 15px;
+            border-radius: 10px;
+            background: #f5f5f5;
+            display: none;
+        }
+
+        .status.active {
+            display: block;
+        }
+
+        .status.error {
+            background: #f8d7da;
+            color: #721c24;
+            border: 1px solid #f5c6cb;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>📱 Pairing</h1>
+        <p class="subtitle">Scan this QR code with your iOS device</p>
+        
+        <div class="qr-container">
+            <img id="qrCode" alt="QR Code" />
+        </div>
+
+        <div class="info-section">
+            <h3>Connection Info</h3>
+            <div class="info-item">
+                <strong>Laptop IP:</strong> <span id="laptopIP">Loading...</span>
+            </div>
+            <div class="info-item">
+                <strong>Token:</strong>
+            </div>
+            <div class="token-display" id="tokenDisplay">Loading...</div>
+        </div>
+
+        <a href="/" class="button">Back to Home</a>
+
+        <div id="status" class="status"></div>
+    </div>
+
+    <script>
+        async function loadPairingInfo() {
+            try {
+                const response = await fetch('/new');
+                if (!response.ok) {
+                    throw new Error('Failed to load pairing info');
+                }
+
+                const data = await response.json();
+                
+                // Display QR code
+                document.getElementById('qrCode').src = data.qrDataUrl;
+                
+                // Display token
+                document.getElementById('tokenDisplay').textContent = data.token;
+                
+                // Extract and display laptop IP from URL or use hostname
+                const url = new URL(data.url);
+                const hostname = window.location.hostname;
+                const laptopIP = hostname === 'localhost' || hostname === '127.0.0.1' 
+                    ? 'Your local IP (check network settings)' 
+                    : hostname;
+                
+                document.getElementById('laptopIP').textContent = laptopIP;
+                
+                // Update QR code to include IP in the URL if possible
+                // The QR code already contains the full URL, but we can enhance it
+                // For now, the QR contains the download URL, which the phone can parse
+                
+            } catch (error) {
+                console.error('Error loading pairing info:', error);
+                document.getElementById('status').textContent = 'Failed to load pairing info: ' + error.message;
+                document.getElementById('status').className = 'status active error';
+            }
+        }
+
+        // Load pairing info on page load
+        loadPairingInfo();
+    </script>
+</body>
+</html>

@@ -5,6 +5,7 @@ const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
 const QRCode = require('qrcode');
+const os = require('os');
 
 const app = express();
 const server = http.createServer(app);
@@ -83,6 +84,23 @@ function sendToPhone(token, data) {
   }
 }
 
+// Keepalive ping/pong setup
+const KEEPALIVE_INTERVAL = 20000; // 20 seconds
+setInterval(() => {
+  sessions.forEach((session, token) => {
+    // Ping phone connection
+    if (session.phoneWs && session.phoneWs.readyState === WebSocket.OPEN) {
+      session.phoneWs.ping();
+    }
+    // Ping UI connections
+    session.uiWsSet.forEach((uiWs) => {
+      if (uiWs.readyState === WebSocket.OPEN) {
+        uiWs.ping();
+      }
+    });
+  });
+}, KEEPALIVE_INTERVAL);
+
 // WebSocket connection handling
 wss.on('connection', (ws, req) => {
   let token = null;
@@ -90,6 +108,11 @@ wss.on('connection', (ws, req) => {
   let session = null;
 
   console.log('[WebSocket] New client connecting...');
+  
+  // Handle pong responses
+  ws.on('pong', () => {
+    // Client responded to ping, connection is alive
+  });
 
   // Handle incoming messages
   ws.on('message', (data, isBinary) => {
@@ -141,6 +164,8 @@ wss.on('connection', (ws, req) => {
             }
             session.phoneWs = ws;
             console.log(`[Session] Phone connected: ${token}`);
+            // Notify UI clients that phone connected
+            sendToUI(token, { type: 'status', value: 'phone_connected', timestamp: new Date().toISOString() });
           } else if (role === 'ui') {
             session.uiWsSet.add(ws);
             console.log(`[Session] UI client connected: ${token} (${session.uiWsSet.size} UI client(s))`);
@@ -183,6 +208,8 @@ wss.on('connection', (ws, req) => {
       if (role === 'phone') {
         session.phoneWs = null;
         console.log(`[Session] Phone disconnected: ${token} (code: ${code})`);
+        // Notify UI clients that phone disconnected
+        sendToUI(token, { type: 'status', value: 'phone_disconnected', timestamp: new Date().toISOString() });
       } else if (role === 'ui') {
         session.uiWsSet.delete(ws);
         console.log(`[Session] UI client disconnected: ${token} (${session.uiWsSet.size} UI client(s) remaining, code: ${code})`);
@@ -230,24 +257,44 @@ const upload = multer({
 
 // HTTP Routes
 
+// Helper: Get local IP address
+function getLocalIP() {
+  const interfaces = os.networkInterfaces();
+  for (const name of Object.keys(interfaces)) {
+    for (const iface of interfaces[name]) {
+      // Skip internal (loopback) and non-IPv4 addresses
+      if (iface.family === 'IPv4' && !iface.internal) {
+        return iface.address;
+      }
+    }
+  }
+  return 'localhost';
+}
+
 // GET /new - Generate new session token
 app.get('/new', async (req, res) => {
   try {
     const token = generateToken();
-    const url = `http://localhost:${PORT}/download/${token}/room.usdz`;
+    const localIP = getLocalIP();
+    const url = `http://${localIP}:${PORT}/download/${token}/room.usdz`;
     
-    // Generate QR code as data URL
-    const qrDataUrl = await QRCode.toDataURL(url, {
+    // Create pairing URL with token and host
+    const pairingUrl = `roomscan://pair?token=${token}&host=${localIP}&port=${PORT}`;
+    
+    // Generate QR code as data URL (use pairing URL for easier parsing)
+    const qrDataUrl = await QRCode.toDataURL(pairingUrl, {
       width: 300,
       margin: 2
     });
 
-    console.log(`[HTTP] Generated new session: ${token}`);
+    console.log(`[HTTP] Generated new session: ${token} (IP: ${localIP})`);
 
     res.json({
       token,
       url,
-      qrDataUrl
+      qrDataUrl,
+      laptopIP: localIP,
+      pairingUrl: pairingUrl
     });
   } catch (error) {
     console.error('[HTTP] Error generating session:', error);
@@ -269,6 +316,12 @@ app.post('/upload/usdz', upload.single('file'), (req, res) => {
     if (!req.file) {
       console.warn(`[HTTP] Upload attempted without file for token: ${token}`);
       return res.status(400).json({ error: 'No file uploaded' });
+    }
+
+    // Ensure uploads directory exists (redundant check for safety)
+    const tokenDir = path.join(UPLOADS_DIR, token);
+    if (!fs.existsSync(tokenDir)) {
+      fs.mkdirSync(tokenDir, { recursive: true });
     }
 
     const filePath = req.file.path;
