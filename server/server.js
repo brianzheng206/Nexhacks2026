@@ -21,7 +21,16 @@ if (!fs.existsSync(UPLOADS_DIR)) {
 
 // Middleware
 app.use(express.json());
-app.use(express.static('public'));
+
+if (process.env.NODE_ENV === 'development') {
+  const { createProxyMiddleware } = require('http-proxy-middleware');
+  app.use('/', createProxyMiddleware({
+    target: 'http://localhost:5173',
+    changeOrigin: true,
+  }));
+} else {
+  app.use(express.static(path.join(__dirname, 'public', 'dist')));
+}
 
 // Sessions Map: token -> { phoneWs, uiWsSet, latestUsdzPath }
 const sessions = new Map();
