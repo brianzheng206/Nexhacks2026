@@ -23,21 +23,29 @@ class WSClient: ObservableObject {
     var onInstruction: ((String) -> Void)?
     var onStatus: ((String) -> Void)?
     
-    var currentLaptopIP: String?
+    var currentHost: String?
+    var currentPort: Int?
     private var currentToken: String?
     private var helloCompletion: ((Bool, String?) -> Void)?
     private var isWaitingForHelloAck: Bool = false
     
     private init() {}
     
-    func connect(laptopIP: String, token: String, completion: @escaping (Bool, String?) -> Void) {
-        currentLaptopIP = laptopIP
+    func connect(laptopHost: String, port: Int = 8080, token: String, completion: @escaping (Bool, String?) -> Void) {
+        let trimmedHost = laptopHost.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedHost.isEmpty else {
+            completion(false, "Invalid server address")
+            return
+        }
+
+        currentHost = trimmedHost
+        currentPort = port
         currentToken = token
         helloCompletion = completion
         
-        let urlString = "ws://\(laptopIP):8080"
+        let urlString = "ws://\(trimmedHost):\(port)"
         guard let url = URL(string: urlString) else {
-            completion(false, "Invalid URL")
+            completion(false, "Invalid WebSocket URL")
             return
         }
         
@@ -48,29 +56,42 @@ class WSClient: ObservableObject {
         webSocketTask = session.webSocketTask(with: url)
         urlSession = session
         
-        webSocketTask?.resume()
-        
         // Start receiving messages first (to catch hello_ack)
         receiveMessages()
         
-        // Send hello message
-        sendHello(token: token)
+        // Resume the connection
+        webSocketTask?.resume()
+        
+        // Give the WebSocket a brief moment to establish connection
+        // URLSessionWebSocketTask will queue messages, but a small delay ensures better reliability
+        // This is especially important on slower networks
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
+            guard let self = self else { return }
+            // Send hello message - if connection isn't ready, send() will handle it
+            self.sendHello(token: token)
+        }
         
         // Set timeout for hello_ack
         DispatchQueue.main.asyncAfter(deadline: .now() + 5.0) { [weak self] in
             guard let self = self, self.isWaitingForHelloAck else { return }
             self.isWaitingForHelloAck = false
-            self.helloCompletion?(false, "Connection timeout")
+            print("[WSClient] Connection timeout - no hello_ack received after 5 seconds")
+            self.helloCompletion?(false, "Connection timeout - server may be unreachable or token invalid")
             self.helloCompletion = nil
         }
     }
     
     private func sendHello(token: String) {
+        // Trim whitespace from token to handle copy-paste issues
+        let trimmedToken = token.trimmingCharacters(in: .whitespacesAndNewlines)
+        
         let helloMessage: [String: Any] = [
             "type": "hello",
             "role": "phone",
-            "token": token
+            "token": trimmedToken
         ]
+        
+        print("[WSClient] Sending hello with token: '\(trimmedToken)' (length: \(trimmedToken.count))")
         
         guard let jsonData = try? JSONSerialization.data(withJSONObject: helloMessage),
               let jsonString = String(data: jsonData, encoding: .utf8) else {
@@ -83,10 +104,25 @@ class WSClient: ObservableObject {
         webSocketTask?.send(message) { [weak self] error in
             if let error = error {
                 print("[WSClient] Error sending hello: \(error)")
-                self?.helloCompletion?(false, "Failed to send hello: \(error.localizedDescription)")
+                let errorMsg: String
+                if let urlError = error as? URLError {
+                    switch urlError.code {
+                    case .notConnectedToInternet:
+                        errorMsg = "No internet connection"
+                    case .cannotConnectToHost:
+                        errorMsg = "Cannot connect to server. Check IP address and ensure server is running."
+                    case .timedOut:
+                        errorMsg = "Connection timed out"
+                    default:
+                        errorMsg = "Connection error: \(urlError.localizedDescription)"
+                    }
+                } else {
+                    errorMsg = "Failed to send hello: \(error.localizedDescription)"
+                }
+                self?.helloCompletion?(false, errorMsg)
                 self?.helloCompletion = nil
             } else {
-                print("[WSClient] Hello message sent, waiting for ack...")
+                print("[WSClient] Hello message sent successfully, waiting for hello_ack...")
                 self?.isWaitingForHelloAck = true
             }
         }
@@ -166,14 +202,27 @@ class WSClient: ObservableObject {
         print("[WSClient] Received binary data: \(data.count) bytes")
     }
     
+    // Flag to track if a frame send is in progress (backpressure)
+    private var isSendingFrame = false
+    
     func sendJPEGFrame(_ data: Data) {
         guard isConnected else {
             // Silently skip if not connected (avoid log spam)
             return
         }
         
+        // Backpressure: skip if previous frame is still being sent
+        // This prevents WebSocket buffer buildup which causes flickering/lag
+        guard !isSendingFrame else {
+            return
+        }
+        
+        isSendingFrame = true
+        
         let message = URLSessionWebSocketTask.Message.data(data)
-        webSocketTask?.send(message) { error in
+        webSocketTask?.send(message) { [weak self] error in
+            self?.isSendingFrame = false
+            
             if let error = error {
                 print("[WSClient] Error sending JPEG frame (\(data.count) bytes): \(error)")
             }
@@ -199,9 +248,10 @@ class WSClient: ObservableObject {
         onConnectionStateChanged?(false)
         
         // Attempt to reconnect
-        if let ip = currentLaptopIP, let token = currentToken {
+        if let host = currentHost, let token = currentToken {
+            let port = currentPort ?? 8080
             reconnectTimer = Timer.scheduledTimer(withTimeInterval: 3.0, repeats: false) { [weak self] _ in
-                self?.connect(laptopIP: ip, token: token) { _, _ in }
+                self?.connect(laptopHost: host, port: port, token: token) { _, _ in }
             }
         }
     }

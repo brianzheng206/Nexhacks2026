@@ -2,20 +2,70 @@
 //  ScanView.swift
 //  RoomScanRemote
 //
-//  Scan screen with status and controls
+//  Scan screen with real-time 3D visualization and controls
 //
 
 import SwiftUI
 import RoomPlan
+import ARKit
+import RealityKit
+
+// MARK: - ARView Wrapper for SwiftUI
+// Uses ARView to display the AR camera feed with RoomPlan overlay
+
+struct ARViewRepresentable: UIViewRepresentable {
+    let arSession: ARSession?
+    
+    func makeUIView(context: Context) -> ARView {
+        let arView = ARView(frame: .zero)
+        // Configure ARView to show camera feed
+        arView.session = arSession ?? ARSession()
+        return arView
+    }
+    
+    func updateUIView(_ uiView: ARView, context: Context) {
+        // Update the AR session if it changes
+        if let session = arSession, uiView.session !== session {
+            uiView.session = session
+        }
+    }
+}
+
+// MARK: - Placeholder View when not scanning
+
+struct ScanPlaceholderView: View {
+    var body: some View {
+        VStack(spacing: 16) {
+            Image(systemName: "cube.transparent")
+                .font(.system(size: 60))
+                .foregroundColor(.gray.opacity(0.5))
+            
+            Text("3D Room Preview")
+                .font(.headline)
+                .foregroundColor(.gray)
+            
+            Text("Start scanning to see the\nreal-time 3D reconstruction")
+                .font(.caption)
+                .foregroundColor(.gray.opacity(0.7))
+                .multilineTextAlignment(.center)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Color.black.opacity(0.9))
+    }
+}
+
+// MARK: - Main ScanView
 
 struct ScanView: View {
-    let laptopIP: String
+    let serverHost: String
+    let serverPort: Int
     let token: String
     
     @StateObject private var scanController = ScanController()
     
-    init(laptopIP: String, token: String) {
-        self.laptopIP = laptopIP
+    init(serverHost: String, serverPort: Int, token: String) {
+        self.serverHost = serverHost
+        self.serverPort = serverPort
         self.token = token
     }
     @State private var statusMessage: String = "Connected"
@@ -25,75 +75,42 @@ struct ScanView: View {
     @State private var wasConnected: Bool = false
     
     var body: some View {
-        VStack(spacing: 30) {
-            Text("RoomScan Remote")
-                .font(.title)
-                .fontWeight(.bold)
-                .padding(.top)
-            
-            // Status display
-            VStack(spacing: 10) {
-                Text("Status")
-                    .font(.headline)
-                Text(statusMessage)
-                    .font(.body)
-                    .foregroundColor(statusColor)
-                    .padding()
-                    .frame(maxWidth: .infinity)
-                    .background(Color.gray.opacity(0.1))
-                    .cornerRadius(10)
-            }
-            .padding(.horizontal)
-            
-            // Local controls (for testing)
-            if showLocalControls {
-                VStack(spacing: 15) {
-                    Button(action: startScan) {
-                        Text("Start Scan")
-                            .fontWeight(.semibold)
-                            .frame(maxWidth: .infinity)
-                            .padding()
-                            .background(Color.green)
-                            .foregroundColor(.white)
-                            .cornerRadius(10)
+        GeometryReader { geometry in
+            VStack(spacing: 0) {
+                // Header with status
+                headerView
+                    .frame(height: 60)
+                    .background(Color(UIColor.systemBackground))
+                
+                // 3D Room Capture View - takes up most of the screen
+                ZStack {
+                    if scanController.isScanning, let session = scanController.roomCaptureSession {
+                        // Show the AR camera feed with RoomPlan overlay
+                        // RoomPlan automatically overlays the 3D room reconstruction on the ARSession
+                        ARViewRepresentable(arSession: session.arSession)
+                            .ignoresSafeArea(edges: .horizontal)
+                    } else {
+                        // Placeholder when not scanning
+                        ScanPlaceholderView()
                     }
-                    .disabled(scanController.isScanning || !WSClient.shared.isConnected || !RoomCaptureSession.isSupported)
                     
-                    Button(action: stopScan) {
-                        Text("Stop Scan")
-                            .fontWeight(.semibold)
-                            .frame(maxWidth: .infinity)
-                            .padding()
-                            .background(Color.red)
-                            .foregroundColor(.white)
-                            .cornerRadius(10)
+                    // Overlay status indicator
+                    VStack {
+                        Spacer()
+                        statusOverlay
+                            .padding(.bottom, 8)
                     }
-                    .disabled(!scanController.isScanning)
                 }
-                .padding(.horizontal)
+                .frame(height: geometry.size.height * 0.55) // 55% of screen for 3D view
+                
+                // Controls panel at bottom
+                controlsPanel
+                    .frame(maxHeight: .infinity)
+                    .background(Color(UIColor.systemBackground))
             }
-            
-            // Connection info
-            VStack(alignment: .leading, spacing: 5) {
-                Text("Connection Info")
-                    .font(.headline)
-                Text("IP: \(laptopIP)")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-                Text("Token: \(token)")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-            }
-            .padding()
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(Color.gray.opacity(0.1))
-            .cornerRadius(10)
-            .padding(.horizontal)
-            
-            Spacer()
         }
-        .padding()
         .navigationBarTitleDisplayMode(.inline)
+        .navigationBarHidden(true)
         .alert("Connection Lost", isPresented: $showReconnectAlert) {
             Button("Reconnect") {
                 reconnect()
@@ -119,18 +136,135 @@ struct ScanView: View {
         }
     }
     
+    // MARK: - Header View
+    
+    private var headerView: some View {
+        HStack {
+            Text("RoomScan Remote")
+                .font(.headline)
+                .fontWeight(.bold)
+            
+            Spacer()
+            
+            // Status indicator
+            HStack(spacing: 6) {
+                Circle()
+                    .fill(statusColor)
+                    .frame(width: 8, height: 8)
+                Text(statusMessage)
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 5)
+            .background(Color.gray.opacity(0.15))
+            .cornerRadius(12)
+        }
+        .padding(.horizontal)
+    }
+    
+    // MARK: - Status Overlay (shown on top of 3D view)
+    
+    private var statusOverlay: some View {
+        HStack(spacing: 12) {
+            if scanController.isScanning {
+                // Recording indicator
+                HStack(spacing: 6) {
+                    Circle()
+                        .fill(Color.red)
+                        .frame(width: 10, height: 10)
+                        .opacity(0.8)
+                    Text("SCANNING")
+                        .font(.caption)
+                        .fontWeight(.semibold)
+                        .foregroundColor(.white)
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 6)
+                .background(Color.black.opacity(0.6))
+                .cornerRadius(16)
+            }
+        }
+    }
+    
+    // MARK: - Controls Panel
+    
+    private var controlsPanel: some View {
+        VStack(spacing: 16) {
+            // Scan controls
+            HStack(spacing: 12) {
+                Button(action: startScan) {
+                    HStack {
+                        Image(systemName: "play.fill")
+                        Text("Start Scan")
+                    }
+                    .fontWeight(.semibold)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 14)
+                    .background(scanController.isScanning || !WSClient.shared.isConnected || !RoomCaptureSession.isSupported ? Color.gray : Color.green)
+                    .foregroundColor(.white)
+                    .cornerRadius(12)
+                }
+                .disabled(scanController.isScanning || !WSClient.shared.isConnected || !RoomCaptureSession.isSupported)
+                
+                Button(action: stopScan) {
+                    HStack {
+                        Image(systemName: "stop.fill")
+                        Text("Stop Scan")
+                    }
+                    .fontWeight(.semibold)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 14)
+                    .background(!scanController.isScanning ? Color.gray : Color.red)
+                    .foregroundColor(.white)
+                    .cornerRadius(12)
+                }
+                .disabled(!scanController.isScanning)
+            }
+            .padding(.horizontal)
+            
+            // Connection info (compact)
+            HStack {
+                Image(systemName: "wifi")
+                    .foregroundColor(.secondary)
+                Text("Server: \(serverHost):\(serverPort)")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                
+                Divider()
+                    .frame(height: 12)
+                
+                Image(systemName: "key")
+                    .foregroundColor(.secondary)
+                Text("Token: \(String(token.prefix(8)))...")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+            .padding(.vertical, 8)
+            .padding(.horizontal, 16)
+            .background(Color.gray.opacity(0.1))
+            .cornerRadius(10)
+            .padding(.horizontal)
+        }
+        .padding(.vertical, 16)
+    }
+    
+    // MARK: - Computed Properties
+    
     private var statusColor: Color {
         switch statusMessage.lowercased() {
         case "connected":
             return .green
         case "scanning":
             return .blue
-        case "disconnected":
+        case "disconnected", "disconnected - please reconnect":
             return .red
         default:
             return .orange
         }
     }
+    
+    // MARK: - Methods
     
     private func setupWebSocketHandlers() {
         let wsClient = WSClient.shared
@@ -166,7 +300,7 @@ struct ScanView: View {
     
     private func reconnect() {
         let wsClient = WSClient.shared
-        wsClient.connect(laptopIP: laptopIP, token: token) { success, error in
+        wsClient.connect(laptopHost: serverHost, port: serverPort, token: token) { success, error in
             DispatchQueue.main.async {
                 if success {
                     statusMessage = "Connected"

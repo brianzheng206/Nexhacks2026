@@ -12,6 +12,7 @@ import AudioToolbox
 struct QRScannerView: UIViewControllerRepresentable {
     @Binding var scannedToken: String?
     @Binding var scannedHost: String?
+    @Binding var scannedPort: Int?
     @Environment(\.presentationMode) var presentationMode
     
     func makeUIViewController(context: Context) -> QRScannerViewController {
@@ -35,16 +36,17 @@ struct QRScannerView: UIViewControllerRepresentable {
             self.parent = parent
         }
         
-        func didScanQRCode(token: String?, host: String?) {
+        func didScanQRCode(token: String?, host: String?, port: Int?) {
             parent.scannedToken = token
             parent.scannedHost = host
+            parent.scannedPort = port
             parent.presentationMode.wrappedValue.dismiss()
         }
     }
 }
 
 protocol QRScannerDelegate: AnyObject {
-    func didScanQRCode(token: String?, host: String?)
+    func didScanQRCode(token: String?, host: String?, port: Int?)
 }
 
 class QRScannerViewController: UIViewController {
@@ -169,7 +171,7 @@ class QRScannerViewController: UIViewController {
         dismiss(animated: true)
     }
     
-    private func parseQRCode(_ string: String) -> (token: String?, host: String?) {
+    private func parseQRCode(_ string: String) -> (token: String?, host: String?, port: Int?) {
         // Try to parse roomscan://pair?token=...&host=...&port=...
         if let url = URL(string: string),
            url.scheme == "roomscan",
@@ -179,8 +181,10 @@ class QRScannerViewController: UIViewController {
             
             let token = queryItems?.first(where: { $0.name == "token" })?.value
             let host = queryItems?.first(where: { $0.name == "host" })?.value
+            let portValue = queryItems?.first(where: { $0.name == "port" })?.value
+            let port = portValue.flatMap { Int($0) }
             
-            return (token, host)
+            return (token, host, port)
         }
         
         // Try to parse http://.../download/<token>/room.usdz
@@ -191,7 +195,7 @@ class QRScannerViewController: UIViewController {
                 if let tokenIndex = pathComponents.firstIndex(of: "download"), tokenIndex + 1 < pathComponents.count {
                     let token = pathComponents[tokenIndex + 1]
                     let host = url.host
-                    return (token, host)
+                    return (token, host, url.port)
                 }
             }
         }
@@ -202,10 +206,10 @@ class QRScannerViewController: UIViewController {
            let queryItems = components.queryItems {
             let token = queryItems.first(where: { $0.name == "token" })?.value
             let host = queryItems.first(where: { $0.name == "host" })?.value ?? url.host
-            return (token, host)
+            return (token, host, url.port)
         }
         
-        return (nil, nil)
+        return (nil, nil, nil)
     }
 }
 
@@ -219,13 +223,13 @@ extension QRScannerViewController: AVCaptureMetadataOutputObjectsDelegate {
             captureSession?.stopRunning()
             
             // Parse QR code
-            let (token, host) = parseQRCode(stringValue)
+            let (token, host, port) = parseQRCode(stringValue)
             
             // Vibrate on success
             AudioServicesPlaySystemSound(SystemSoundID(kSystemSoundID_Vibrate))
             
             // Notify delegate
-            delegate?.didScanQRCode(token: token, host: host)
+            delegate?.didScanQRCode(token: token, host: host, port: port)
         }
     }
 }

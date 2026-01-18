@@ -143,7 +143,8 @@ wss.on('connection', (ws, req) => {
   let role = null;
   let session = null;
 
-  console.log('[WebSocket] New client connecting...');
+  const clientIP = req.socket.remoteAddress || 'unknown';
+  console.log(`[WebSocket] New client connecting from ${clientIP}...`);
   
   // Handle pong responses
   ws.on('pong', () => {
@@ -243,25 +244,26 @@ wss.on('connection', (ws, req) => {
 
   // Handle connection close
   ws.on('close', (code, reason) => {
+    const reasonStr = reason ? reason.toString() : 'no reason';
     if (token && role && session) {
       if (role === 'phone') {
         session.phoneWs = null;
-        console.log(`[Session] Phone disconnected: ${token} (code: ${code})`);
+        console.log(`[Session] Phone disconnected: ${token} from ${clientIP} (code: ${code}, reason: ${reasonStr})`);
         // Notify UI clients that phone disconnected
         sendToUI(token, { type: 'status', value: 'phone_disconnected', timestamp: new Date().toISOString() });
       } else if (role === 'ui') {
         session.uiWsSet.delete(ws);
-        console.log(`[Session] UI client disconnected: ${token} (${session.uiWsSet.size} UI client(s) remaining, code: ${code})`);
+        console.log(`[Session] UI client disconnected: ${token} from ${clientIP} (${session.uiWsSet.size} UI client(s) remaining, code: ${code})`);
       }
       cleanupSession(token);
     } else {
-      console.log(`[WebSocket] Unauthenticated client disconnected (code: ${code})`);
+      console.log(`[WebSocket] Unauthenticated client disconnected from ${clientIP} (code: ${code}, reason: ${reasonStr})`);
     }
   });
 
   // Handle errors
   ws.on('error', (error) => {
-    console.error(`[WebSocket] Error for ${role || 'unknown'} client (token: ${token || 'none'}):`, error);
+    console.error(`[WebSocket] Error from ${clientIP} (role: ${role || 'unknown'}, token: ${token || 'none'}):`, error.message || error);
   });
 });
 

@@ -2,13 +2,18 @@
 //  PairingView.swift
 //  RoomScanRemote
 //
-//  Pairing screen with IP and token input
+//  Pairing screen with server address and token input
 //
 
 import SwiftUI
+import Foundation
 
 struct PairingView: View {
-    @State private var laptopIP: String = ""
+    private let defaultPort = 8080
+
+    @State private var serverAddress: String = ""
+    @State private var serverHost: String = ""
+    @State private var serverPort: Int = 8080
     @State private var token: String = ""
     @State private var isConnecting: Bool = false
     @State private var errorMessage: String?
@@ -16,6 +21,7 @@ struct PairingView: View {
     @State private var showQRScanner: Bool = false
     @State private var scannedToken: String?
     @State private var scannedHost: String?
+    @State private var scannedPort: Int?
     
     var body: some View {
         NavigationView {
@@ -26,11 +32,11 @@ struct PairingView: View {
                     .padding(.bottom, 40)
                 
                 VStack(alignment: .leading, spacing: 10) {
-                    Text("Laptop IP Address")
+                    Text("Server Address")
                         .font(.headline)
-                    TextField("e.g., 192.168.1.100", text: $laptopIP)
+                    TextField("e.g., 192.168.1.100:8080", text: $serverAddress)
                         .textFieldStyle(RoundedBorderTextFieldStyle())
-                        .keyboardType(.numbersAndPunctuation)
+                        .keyboardType(.URL)
                         .autocapitalization(.none)
                         .disableAutocorrection(true)
                 }
@@ -82,7 +88,7 @@ struct PairingView: View {
                     .foregroundColor(.white)
                     .cornerRadius(10)
                 }
-                .disabled(isConnecting || laptopIP.isEmpty || token.isEmpty)
+                .disabled(isConnecting || serverAddress.isEmpty || token.isEmpty)
                 .padding(.top, 10)
                 
                 Spacer()
@@ -91,48 +97,47 @@ struct PairingView: View {
             .navigationBarHidden(true)
             .background(
                 NavigationLink(
-                    destination: ScanView(laptopIP: laptopIP, token: token),
+                    destination: ScanView(serverHost: serverHost, serverPort: serverPort, token: token),
                     isActive: $navigateToScan
                 ) {
                     EmptyView()
                 }
             )
             .sheet(isPresented: $showQRScanner) {
-                QRScannerView(scannedToken: $scannedToken, scannedHost: $scannedHost)
+                QRScannerView(scannedToken: $scannedToken, scannedHost: $scannedHost, scannedPort: $scannedPort)
             }
-            .onChange(of: scannedToken) { newToken in
-                if let token = newToken {
-                    self.token = token
-                    // If host was also scanned, use it; otherwise prompt for IP
-                    if let host = scannedHost {
-                        self.laptopIP = host
-                    }
-                }
+            .onChange(of: scannedToken) { _ in
+                applyScannedValues()
+            }
+            .onChange(of: scannedHost) { _ in
+                applyScannedValues()
+            }
+            .onChange(of: scannedPort) { _ in
+                applyScannedValues()
             }
         }
     }
     
     private func connect() {
-        guard !laptopIP.isEmpty, !token.isEmpty else {
-            errorMessage = "Please enter both IP address and token"
+        guard !serverAddress.isEmpty, !token.isEmpty else {
+            errorMessage = "Please enter both server address and token"
             return
         }
         
         isConnecting = true
         errorMessage = nil
         
-        // Validate IP format (basic check)
-        let ipComponents = laptopIP.split(separator: ".")
-        guard ipComponents.count == 4,
-              ipComponents.allSatisfy({ Int($0) != nil && (0...255).contains(Int($0)!) }) else {
-            errorMessage = "Invalid IP address format"
+        guard let parsed = parseServerAddress(serverAddress) else {
+            errorMessage = "Invalid server address. Use host or host:port."
             isConnecting = false
             return
         }
+        serverHost = parsed.host
+        serverPort = parsed.port
         
         // Initialize WebSocket client and attempt connection
         let wsClient = WSClient.shared
-        wsClient.connect(laptopIP: laptopIP, token: token) { success, error in
+        wsClient.connect(laptopHost: parsed.host, port: parsed.port, token: token) { success, error in
             DispatchQueue.main.async {
                 isConnecting = false
                 if success {
@@ -143,5 +148,55 @@ struct PairingView: View {
             }
         }
     }
-}
 
+    private func applyScannedValues() {
+        if let token = scannedToken {
+            self.token = token
+        }
+        if let host = scannedHost {
+            if let port = scannedPort {
+                serverAddress = "\(host):\(port)"
+            } else {
+                serverAddress = host
+            }
+        }
+    }
+
+    private func parseServerAddress(_ input: String) -> (host: String, port: Int)? {
+        let trimmed = input.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+
+        if let url = URL(string: trimmed),
+           url.scheme == "roomscan",
+           url.host == "pair" {
+            let components = URLComponents(url: url, resolvingAgainstBaseURL: false)
+            let host = components?.queryItems?.first(where: { $0.name == "host" })?.value
+            let portValue = components?.queryItems?.first(where: { $0.name == "port" })?.value
+            let port = Int(portValue ?? "") ?? defaultPort
+            if let host = host, !host.isEmpty {
+                return (host, port)
+            }
+        }
+
+        if trimmed.contains("://") || trimmed.contains("/") || trimmed.contains("?") {
+            let urlString = trimmed.contains("://") ? trimmed : "http://\(trimmed)"
+            if let url = URL(string: urlString), let host = url.host, !host.isEmpty {
+                return (host, url.port ?? defaultPort)
+            }
+        }
+
+        let parts = trimmed.split(separator: ":", maxSplits: 1, omittingEmptySubsequences: false)
+        if parts.count == 2 {
+            let host = String(parts[0])
+            let portValue = String(parts[1])
+            guard !host.isEmpty,
+                  let port = Int(portValue),
+                  (1...65535).contains(port) else {
+                return nil
+            }
+            return (host, port)
+        }
+
+        return (trimmed, defaultPort)
+    }
+}

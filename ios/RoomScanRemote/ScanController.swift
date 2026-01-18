@@ -15,11 +15,27 @@ class ScanController: NSObject, ObservableObject {
     @Published var isScanning: Bool = false
     @Published var errorMessage: String?
     
-    private var roomCaptureSession: RoomCaptureSession?
+    // Expose the RoomCaptureSession so it can be used with RoomCaptureView
+    @Published private(set) var roomCaptureSession: RoomCaptureSession?
     private var lastUpdateTime: TimeInterval = 0
     private var lastFrameTime: TimeInterval = 0
     private let updateInterval: TimeInterval = 0.2 // 5Hz = 200ms for room updates
     private let frameInterval: TimeInterval = 0.1 // 10 fps = 100ms for preview frames
+    private var lastMeshUpdateTime: TimeInterval = 0
+    private let meshUpdateInterval: TimeInterval = 0.5 // 2Hz = 500ms for mesh updates (lower frequency due to size)
+    
+    // Reusable CIContext for JPEG conversion - creating this once prevents flickering
+    // CIContext is heavyweight and expensive to create; reusing it is critical for performance
+    private lazy var ciContext: CIContext = {
+        // Use default options - hardware accelerated, no caching for better performance
+        return CIContext()
+    }()
+    
+    // Serial queue for frame processing to prevent out-of-order frames
+    private let frameProcessingQueue = DispatchQueue(label: "com.roomscan.frameProcessing", qos: .userInitiated)
+    
+    // Flag to prevent frame queue buildup (backpressure)
+    private var isProcessingFrame = false
     
     var token: String?
     
@@ -47,11 +63,18 @@ class ScanController: NSObject, ObservableObject {
         // Set ARSession delegate for frame capture
         roomCaptureSession.arSession.delegate = self
         
-        // Configure with coaching enabled
+        // Enable scene reconstruction for detailed mesh with classification
+        // This gives us colored, detailed mesh instead of just boxes
+        let arConfig = ARWorldTrackingConfiguration()
+        arConfig.sceneReconstruction = .meshWithClassification // Enables detailed mesh with semantic colors
+        arConfig.planeDetection = [.horizontal, .vertical]
+        roomCaptureSession.arSession.run(arConfig, options: [.resetTracking, .removeExistingAnchors])
+        
+        // Configure RoomPlan with coaching enabled
         var configuration = RoomCaptureSession.Configuration()
         configuration.isCoachingEnabled = true
         
-        // Run the session
+        // Run the RoomPlan session
         roomCaptureSession.run(configuration: configuration)
         
         DispatchQueue.main.async {
@@ -200,10 +223,11 @@ class ScanController: NSObject, ObservableObject {
             print("[ScanController] USDZ exported to: \(fileURL.path)")
             
             // Upload to server
-            if let laptopIP = WSClient.shared.currentLaptopIP, let token = token {
-                uploadUSDZ(fileURL: fileURL, laptopIP: laptopIP, token: token)
+            if let host = WSClient.shared.currentHost, let token = token {
+                let port = WSClient.shared.currentPort ?? 8080
+                uploadUSDZ(fileURL: fileURL, host: host, port: port, token: token)
             } else {
-                print("[ScanController] Cannot upload: missing laptopIP or token")
+                print("[ScanController] Cannot upload: missing server host or token")
             }
             
         } catch {
@@ -213,8 +237,8 @@ class ScanController: NSObject, ObservableObject {
     }
     
     // Upload USDZ to server
-    func uploadUSDZ(fileURL: URL, laptopIP: String, token: String) {
-        let uploadURL = URL(string: "http://\(laptopIP):8080/upload/usdz?token=\(token)")!
+    func uploadUSDZ(fileURL: URL, host: String, port: Int, token: String) {
+        let uploadURL = URL(string: "http://\(host):\(port)/upload/usdz?token=\(token)")!
         
         var request = URLRequest(url: uploadURL)
         request.httpMethod = "POST"
@@ -331,18 +355,54 @@ extension ScanController: RoomCaptureSessionDelegate {
 // MARK: - ARSessionDelegate
 
 extension ScanController: ARSessionDelegate {
+    func session(_ session: ARSession, didAdd anchors: [ARAnchor]) {
+        // Handle mesh anchors for detailed 3D reconstruction
+        for anchor in anchors {
+            if let meshAnchor = anchor as? ARMeshAnchor {
+                sendMeshUpdate(meshAnchor: meshAnchor)
+            }
+        }
+    }
+    
+    func session(_ session: ARSession, didUpdate anchors: [ARAnchor]) {
+        // Update mesh anchors as they refine
+        let currentTime = Date().timeIntervalSince1970
+        guard currentTime - lastMeshUpdateTime >= meshUpdateInterval else { return }
+        lastMeshUpdateTime = currentTime
+        
+        for anchor in anchors {
+            if let meshAnchor = anchor as? ARMeshAnchor {
+                sendMeshUpdate(meshAnchor: meshAnchor)
+            }
+        }
+    }
+    
     func session(_ session: ARSession, didUpdate frame: ARFrame) {
         // Throttle to ~10 fps
         let currentTime = Date().timeIntervalSince1970
         guard currentTime - lastFrameTime >= frameInterval else { return }
-        lastFrameTime = currentTime
         
-        // Convert CVPixelBuffer to JPEG Data on background queue to avoid blocking
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+        // Backpressure: skip this frame if still processing the previous one
+        // This prevents frame queue buildup which causes flickering
+        guard !isProcessingFrame else { return }
+        
+        lastFrameTime = currentTime
+        isProcessingFrame = true
+        
+        // Copy pixel buffer reference before dispatching
+        let pixelBuffer = frame.capturedImage
+        
+        // Process on serial queue to ensure frame ordering
+        frameProcessingQueue.async { [weak self] in
             guard let self = self else { return }
             
-            guard let jpegData = self.convertPixelBufferToJPEG(frame.capturedImage) else {
-                // Conversion failed, skip this frame (error already logged)
+            defer {
+                // Mark processing complete so next frame can be processed
+                self.isProcessingFrame = false
+            }
+            
+            guard let jpegData = self.convertPixelBufferToJPEG(pixelBuffer) else {
+                // Conversion failed, skip this frame
                 return
             }
             
@@ -352,38 +412,164 @@ extension ScanController: ARSessionDelegate {
     }
     
     private func convertPixelBufferToJPEG(_ pixelBuffer: CVPixelBuffer) -> Data? {
-        do {
-            // Create CIImage from CVPixelBuffer
-            let ciImage = CIImage(cvPixelBuffer: pixelBuffer)
-            
-            // Create CIContext with options for better performance
-            let context = CIContext(options: [
-                .useSoftwareRenderer: false,
-                .workingColorSpace: NSNull()
-            ])
-            
-            // Convert to CGImage
-            guard let cgImage = context.createCGImage(ciImage, from: ciImage.extent) else {
-                print("[ScanController] Failed to create CGImage from CIImage")
-                return nil
-            }
-            
-            // Convert to UIImage
-            // ARFrame images are typically in landscape orientation, adjust as needed
-            let uiImage = UIImage(cgImage: cgImage, scale: 1.0, orientation: .right)
-            
-            // Convert to JPEG Data with compression quality (0.7 = good balance of quality/size)
-            guard let jpegData = uiImage.jpegData(compressionQuality: 0.7) else {
-                print("[ScanController] Failed to convert UIImage to JPEG")
-                return nil
-            }
-            
-            return jpegData
-        } catch {
-            // Safeguard: catch any errors during conversion
-            print("[ScanController] Error converting pixel buffer to JPEG: \(error)")
+        // Create CIImage from CVPixelBuffer
+        let ciImage = CIImage(cvPixelBuffer: pixelBuffer)
+        
+        // Use the reusable CIContext (critical for performance - creating new context per frame causes flickering)
+        guard let cgImage = ciContext.createCGImage(ciImage, from: ciImage.extent) else {
+            print("[ScanController] Failed to create CGImage from CIImage")
             return nil
+        }
+        
+        // Convert to UIImage
+        // ARFrame images are typically in landscape orientation, adjust as needed
+        let uiImage = UIImage(cgImage: cgImage, scale: 1.0, orientation: .right)
+        
+        // Convert to JPEG Data with compression quality (0.6 = good balance of quality/size for streaming)
+        guard let jpegData = uiImage.jpegData(compressionQuality: 0.6) else {
+            print("[ScanController] Failed to convert UIImage to JPEG")
+            return nil
+        }
+        
+        return jpegData
+    }
+    
+    // Send mesh update with colors and detail
+    // Uses verified ARKit APIs: ARMeshAnchor.geometry provides ARGeometrySource/ARGeometryElement
+    private func sendMeshUpdate(meshAnchor: ARMeshAnchor) {
+        guard let token = token else { return }
+        
+        let geometry = meshAnchor.geometry
+        let transform = meshAnchor.transform
+        
+        // Access vertices through ARGeometrySource - verified API
+        // ARMeshGeometry.vertices is an ARGeometrySource
+        let vertexSource = geometry.vertices
+        let vertexCount = vertexSource.count
+        
+        guard vertexCount > 0 else {
+            print("[ScanController] Empty mesh")
+            return
+        }
+        
+        // Extract vertices from ARGeometrySource buffer - verified API
+        var vertexArray: [[Float]] = []
+        let vertexBuffer = vertexSource.buffer
+        let vertexPointer = vertexBuffer.contents().assumingMemoryBound(to: SIMD3<Float>.self)
+        let vertexStride = vertexSource.stride / MemoryLayout<SIMD3<Float>>.size
+        
+        for i in 0..<vertexCount {
+            let vertex = vertexPointer[i * vertexStride]
+            vertexArray.append([vertex.x, vertex.y, vertex.z])
+        }
+        
+        // Access faces through ARGeometryElement - verified API
+        // ARMeshGeometry.faces is an ARGeometryElement
+        let faceElement = geometry.faces
+        let faceCount = faceElement.count
+        var faceArray: [[Int]] = []
+        
+        // Extract face indices from ARGeometryElement buffer - verified API
+        let faceBuffer = faceElement.buffer
+        let facePointer = faceBuffer.contents().assumingMemoryBound(to: UInt32.self)
+        let indicesPerPrimitive = faceElement.indicesPerPrimitive // Should be 3 for triangles
+        let faceStride = faceElement.stride / MemoryLayout<UInt32>.size
+        
+        for i in 0..<faceCount {
+            let baseIndex = i * faceStride * indicesPerPrimitive
+            if baseIndex + 2 < faceElement.count * faceStride * indicesPerPrimitive {
+                faceArray.append([
+                    Int(facePointer[baseIndex]),
+                    Int(facePointer[baseIndex + 1]),
+                    Int(facePointer[baseIndex + 2])
+                ])
+            }
+        }
+        
+        // Get colors based on classification (semantic coloring)
+        // classificationOf(faceWithIndex:) is a verified API
+        var colorArray: [[Float]] = []
+        
+        // For each vertex, find which faces use it and get their classification
+        for vertexIndex in 0..<vertexCount {
+            var classifications: [ARMeshClassification] = []
+            
+            // Sample faces to find which ones use this vertex
+            for faceIndex in 0..<min(faceCount, 100) { // Limit for performance
+                // Get face indices for this face
+                let baseIndex = faceIndex * faceStride * indicesPerPrimitive
+                let v0 = Int(facePointer[baseIndex])
+                let v1 = Int(facePointer[baseIndex + 1])
+                let v2 = Int(facePointer[baseIndex + 2])
+                
+                // Check if this vertex is part of this face
+                if v0 == vertexIndex || v1 == vertexIndex || v2 == vertexIndex {
+                    // Get classification using verified API
+                    let classification = geometry.classificationOf(faceWithIndex: faceIndex)
+                    classifications.append(classification)
+                }
+            }
+            
+            // Use most common classification, or default
+            let mostCommon = classifications.first ?? .none
+            let color = getColorForClassification(mostCommon)
+            colorArray.append([color.r, color.g, color.b, 1.0])
+        }
+        
+        // Flatten transform matrix
+        var transformArray: [Float] = []
+        transformArray.append(transform.columns.0.x)
+        transformArray.append(transform.columns.0.y)
+        transformArray.append(transform.columns.0.z)
+        transformArray.append(transform.columns.0.w)
+        transformArray.append(transform.columns.1.x)
+        transformArray.append(transform.columns.1.y)
+        transformArray.append(transform.columns.1.z)
+        transformArray.append(transform.columns.1.w)
+        transformArray.append(transform.columns.2.x)
+        transformArray.append(transform.columns.2.y)
+        transformArray.append(transform.columns.2.z)
+        transformArray.append(transform.columns.2.w)
+        transformArray.append(transform.columns.3.x)
+        transformArray.append(transform.columns.3.y)
+        transformArray.append(transform.columns.3.z)
+        transformArray.append(transform.columns.3.w)
+        
+        let message: [String: Any] = [
+            "type": "mesh_update",
+            "token": token,
+            "anchorId": meshAnchor.identifier.uuidString,
+            "vertices": vertexArray,
+            "faces": faceArray,
+            "colors": colorArray,
+            "transform": transformArray,
+            "t": Int(Date().timeIntervalSince1970)
+        ]
+        
+        sendMessage(message)
+    }
+    
+    // Get color based on classification (semantic coloring)
+    private func getColorForClassification(_ classification: ARMeshClassification) -> (r: Float, g: Float, b: Float) {
+        switch classification {
+        case .wall:
+            return (0.8, 0.8, 0.9) // Light gray-blue for walls
+        case .floor:
+            return (0.7, 0.7, 0.7) // Gray for floor
+        case .ceiling:
+            return (0.9, 0.9, 0.9) // White for ceiling
+        case .table:
+            return (0.6, 0.4, 0.2) // Brown for tables
+        case .seat:
+            return (0.4, 0.2, 0.6) // Purple for seats
+        case .window:
+            return (0.5, 0.7, 0.9) // Light blue for windows
+        case .door:
+            return (0.5, 0.3, 0.1) // Brown for doors
+        case .none:
+            return (0.5, 0.5, 0.5) // Gray for unclassified
+        @unknown default:
+            return (0.5, 0.5, 0.5) // Default gray
         }
     }
 }
-
