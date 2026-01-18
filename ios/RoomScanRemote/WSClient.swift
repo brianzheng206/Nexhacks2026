@@ -25,12 +25,10 @@ class WSClient {
     
     var currentHost: String?
     var currentPort: Int?
-    // Token stored in memory - marked as sensitive (never logged)
     private var currentToken: String?
     private var helloCompletion: ((Bool, String?) -> Void)?
     private var isWaitingForHelloAck: Bool = false
     
-    // Connection timeout timers
     private var connectionTimeoutTimer: Timer?
     private var helloAckTimeoutTimer: Timer?
     private let connectionTimeout: TimeInterval = 10.0
@@ -49,7 +47,6 @@ class WSClient {
             return
         }
 
-        // Cancel any existing timers
         logger.debug("Cancelling any existing timers...")
         connectionTimeoutTimer?.invalidate()
         helloAckTimeoutTimer?.invalidate()
@@ -71,9 +68,6 @@ class WSClient {
             return
         }
         
-        // Disconnect existing connection if any (but preserve helloCompletion!)
-        // IMPORTANT: Only disconnect if we're not already connecting with the same parameters
-        // This prevents disconnecting a connection that's in progress
         if let existingHost = currentHost, let existingPort = currentPort,
            existingHost == trimmedHost && existingPort == port,
            let existingToken = currentToken, existingToken == token {
@@ -88,24 +82,16 @@ class WSClient {
         urlSession = session
         
         logger.info("Created URLSession and WebSocketTask")
-        
-        // KEY: Start receiving messages FIRST (before resume) - this was the working pattern
         logger.info(">>> Setting up receiveMessages() BEFORE resume()")
         receiveMessages()
-        
-        // Resume the connection
         logger.info(">>> Calling webSocketTask.resume()...")
         webSocketTask?.resume()
-        
-        // Give the WebSocket a brief moment to establish connection
-        // URLSessionWebSocketTask will queue messages, but a small delay ensures better reliability
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
             guard let self = self else { return }
             logger.info(">>> Sending hello after 0.2s delay...")
             self.sendHello(token: token)
         }
         
-        // Set timeout for hello_ack (5 seconds after connection attempt)
         logger.debug("Setting hello_ack timeout timer: \(helloAckTimeout)s")
         helloAckTimeoutTimer = Timer.scheduledTimer(withTimeInterval: helloAckTimeout, repeats: false) { [weak self] _ in
             guard let self = self, self.isWaitingForHelloAck else { return }
@@ -116,7 +102,6 @@ class WSClient {
             self.helloCompletion = nil
         }
         
-        // Set connection timeout (10 seconds total)
         logger.debug("Setting connection timeout timer: \(connectionTimeout)s")
         connectionTimeoutTimer = Timer.scheduledTimer(withTimeInterval: connectionTimeout, repeats: false) { [weak self] _ in
             guard let self = self else { return }
@@ -136,7 +121,6 @@ class WSClient {
     private func sendHello(token: String) {
         logger.info("========== SEND HELLO ==========")
         
-        // Token should already be trimmed by PairingView, but trim again for safety
         let trimmedToken = token.trimmingCharacters(in: .whitespacesAndNewlines)
         
         logger.debug("Token after trim: length=\(trimmedToken.count), masked=\(trimmedToken.maskedForLogging)")
@@ -233,12 +217,10 @@ class WSClient {
                     logger.debug(">>> RECEIVED UNKNOWN MESSAGE TYPE")
                 }
                 
-                // Continue receiving messages (recursive call)
                 self.receiveMessages()
                 
             case .failure(let error):
                 logger.error(">>> RECEIVE ERROR: \(error.localizedDescription)")
-                // Only treat as disconnection if we were connected or waiting for connection
                 if self.isConnected || self.helloCompletion != nil {
                     self.handleDisconnection()
                 }
@@ -278,7 +260,6 @@ class WSClient {
             logger.debug("Calling onConnectionStateChanged callback...")
             onConnectionStateChanged?(true)
             
-            // Call completion on main thread
             logger.debug("Calling helloCompletion callback...")
             let completion = helloCompletion
             helloCompletion = nil
@@ -316,26 +297,21 @@ class WSClient {
     }
     
     private func handleBinaryMessage(_ data: Data) {
-        // Binary messages are JPEG frames - we'll handle these when implementing RoomPlan
         logger.debug("Received binary data: \(data.count) bytes")
     }
     
-    // Flag to track if a frame send is in progress (backpressure)
     private(set) var isSendingFrame = false
     
-    // Check if WebSocket can accept a new frame immediately
     var canAcceptFrame: Bool {
         return isConnected && !isSendingFrame
     }
     
-    // Send JPEG frame - returns true if frame was accepted, false if dropped due to backpressure
     @discardableResult
     func sendJPEGFrame(_ data: Data) -> Bool {
         guard isConnected else {
             return false
         }
         
-        // Backpressure: reject if previous frame is still being sent
         guard !isSendingFrame else {
             return false
         }
@@ -371,7 +347,6 @@ class WSClient {
     private func handleDisconnection() {
         logger.info(">>> handleDisconnection called")
         
-        // Cancel any pending timers
         connectionTimeoutTimer?.invalidate()
         connectionTimeoutTimer = nil
         helloAckTimeoutTimer?.invalidate()
@@ -391,7 +366,6 @@ class WSClient {
     }
     
     private func disconnectInternal(clearCompletion: Bool) {
-        // Cancel all timers
         connectionTimeoutTimer?.invalidate()
         connectionTimeoutTimer = nil
         helloAckTimeoutTimer?.invalidate()
@@ -403,7 +377,6 @@ class WSClient {
         urlSession = nil
         updateConnectionState(false)
         
-        // Clear connection info
         currentHost = nil
         currentPort = nil
         currentToken = nil
@@ -420,11 +393,9 @@ class WSClient {
         onConnectionStateChanged?(false)
     }
     
-    // Thread-safe method to update connection state
     private func updateConnectionState(_ newState: Bool) {
         logger.debug("updateConnectionState: \(isConnected) -> \(newState)")
         
-        // Ensure updates happen on main thread for thread safety
         if Thread.isMainThread {
             isConnected = newState
         } else {

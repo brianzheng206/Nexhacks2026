@@ -9,28 +9,16 @@ import SwiftUI
 import RoomPlan
 import ARKit
 
-// MARK: - RoomCaptureView Wrapper for SwiftUI
-// Uses RoomCaptureView to display the AR session owned by ScanController.
-// Enables mesh reconstruction for detailed 3D geometry capture.
-
 struct RoomCaptureViewRepresentable: UIViewRepresentable {
     let scanController: ScanController
     
     func makeUIView(context: Context) -> RoomCaptureView {
-        // Create the view - RoomCaptureView has its own internal session
         let roomCaptureView = RoomCaptureView(frame: .zero)
         
-        // Connect ScanController to the view's session
         if let session = roomCaptureView.captureSession {
-            // Set ScanController as delegate to receive scanning updates and mesh anchors
             session.delegate = scanController
             session.arSession.delegate = scanController
-            
-            // Store reference in ScanController so it can control the session
             scanController.roomCaptureSession = session
-            
-            // Try to enable mesh reconstruction on the ARSession
-            // Note: This may not work if the session is already running with a different configuration
             enableMeshReconstruction(on: session.arSession)
         }
         
@@ -38,31 +26,29 @@ struct RoomCaptureViewRepresentable: UIViewRepresentable {
     }
     
     func updateUIView(_ uiView: RoomCaptureView, context: Context) {
-        // Ensure the session is still connected
-        if let session = uiView.captureSession, session.delegate !== scanController {
-            session.delegate = scanController
-            session.arSession.delegate = scanController
-            scanController.roomCaptureSession = session
+        // Only update if session changed - avoid unnecessary reassignments that cause jitter
+        // SwiftUI calls this frequently, so we minimize work here
+        if let session = uiView.captureSession {
+            // Only reassign if delegate is actually different to avoid unnecessary updates
+            if session.delegate !== scanController {
+                session.delegate = scanController
+            }
+            if session.arSession.delegate !== scanController {
+                session.arSession.delegate = scanController
+            }
+            // Only update if session reference changed
+            if scanController.roomCaptureSession !== session {
+                scanController.roomCaptureSession = session
+            }
         }
     }
     
-    /// Attempt to enable mesh reconstruction on an existing ARSession
     private func enableMeshReconstruction(on arSession: ARSession) {
-        // Check if mesh reconstruction is supported
         guard ARWorldTrackingConfiguration.supportsSceneReconstruction(.meshWithClassification) else {
-            // Mesh reconstruction not supported - RoomPlan will still provide parametric data
             return
         }
-        
-        // Note: We cannot reconfigure an ARSession that's managed by RoomCaptureView
-        // The mesh reconstruction must be enabled before the session starts
-        // This is a limitation when using RoomCaptureView - for full mesh control,
-        // you would need to use a custom ARView with RoomCaptureSession(arSession:)
-        // ARSession will receive mesh anchors if RoomPlan enables them internally
     }
 }
-
-// MARK: - Placeholder View when not scanning
 
 struct ScanPlaceholderView: View {
     var body: some View {
@@ -84,8 +70,6 @@ struct ScanPlaceholderView: View {
         .background(Color.black.opacity(0.9))
     }
 }
-
-// MARK: - Main ScanView
 
 struct ScanView: View {
     let serverHost: String
@@ -114,28 +98,22 @@ struct ScanView: View {
     var body: some View {
         GeometryReader { geometry in
             VStack(spacing: 0) {
-                // Header with status
                 headerView
                     .frame(height: 60)
                     .background(Color(UIColor.systemBackground))
                 
-                // 3D Room Capture View - takes up most of the screen
                 ZStack {
-                    // Always show RoomCaptureView to display camera feed
-                    // The view will show the camera feed even when not actively scanning
                     RoomCaptureViewRepresentable(scanController: scanController)
                         .ignoresSafeArea(edges: .horizontal)
                     
-                    // Overlay status indicator
                     VStack {
                         Spacer()
                         statusOverlay
                             .padding(.bottom, 8)
                     }
                 }
-                .frame(height: geometry.size.height * 0.55) // 55% of screen for 3D view
+                .frame(height: geometry.size.height * 0.55)
                 
-                // Controls panel at bottom
                 controlsPanel
                     .frame(maxHeight: .infinity)
                     .background(Color(UIColor.systemBackground))
@@ -150,23 +128,17 @@ struct ScanView: View {
             Text(reconnectError ?? "WebSocket connection failed. Would you like to reconnect?")
         }
         .onAppear {
-            // Prevent multiple setup calls
             guard !hasAppeared else { return }
             hasAppeared = true
             
-            // Set token and connection manager in scan controller
             scanController.token = token
             scanController.connectionManager = connectionManager
             
             setupWebSocketHandlers()
             updateStatus()
-            
-            // Verify connection is still active
             updateConnectionState()
         }
         .onDisappear {
-            // Clean up resources when view disappears (handles all exit paths)
-            // This ensures cleanup happens even if user swipes down or uses system gestures
             cleanup()
         }
         .confirmationDialog("Leave Scan Session?", isPresented: $showExitConfirmation) {
@@ -186,17 +158,12 @@ struct ScanView: View {
             handleConnectionStateChange(newState)
         }
         .onChange(of: connectionManager.connectionQuality) { _, quality in
-            updateStatus() // Update status to show quality indicator
+            updateStatus()
         }
         .onChange(of: scanController.isScanning) { _ in
             updateStatus()
         }
-        .onChange(of: scanController.actualFPS) { _, _ in
-            // Trigger view update when FPS changes
-        }
     }
-    
-    // MARK: - Header View
     
     private var headerView: some View {
         HStack {
@@ -218,7 +185,6 @@ struct ScanView: View {
             
             Spacer()
             
-            // Status indicator with connection state and quality
             HStack(spacing: 6) {
                 Circle()
                     .fill(statusColor)
@@ -227,7 +193,6 @@ struct ScanView: View {
                     .font(.caption)
                     .foregroundColor(.secondary)
                 
-                // Connection quality indicator (only show when connected)
                 if connectionManager.isConnected {
                     HStack(spacing: 4) {
                         Circle()
@@ -247,12 +212,9 @@ struct ScanView: View {
         .padding(.horizontal)
     }
     
-    // MARK: - Status Overlay (shown on top of 3D view)
-    
     private var statusOverlay: some View {
         HStack(spacing: 12) {
             if scanController.isScanning {
-                // Recording indicator
                 HStack(spacing: 6) {
                     Circle()
                         .fill(Color.red)
@@ -271,11 +233,8 @@ struct ScanView: View {
         }
     }
     
-    // MARK: - Controls Panel
-    
     private var controlsPanel: some View {
         VStack(spacing: 16) {
-            // Scan controls
             HStack(spacing: 12) {
                 Button(action: startScan) {
                     HStack {
@@ -307,7 +266,6 @@ struct ScanView: View {
             }
             .padding(.horizontal)
             
-            // Connection info (compact)
             HStack {
                 Image(systemName: "wifi")
                     .foregroundColor(.secondary)
@@ -333,8 +291,6 @@ struct ScanView: View {
         .padding(.vertical, 16)
     }
     
-    // MARK: - Computed Properties
-    
     private var statusColor: Color {
         switch connectionManager.connectionState {
         case .connected:
@@ -348,10 +304,7 @@ struct ScanView: View {
         }
     }
     
-    // MARK: - Methods
-    
     private func setupWebSocketHandlers() {
-        // Handle control messages from server
         connectionManager.onControlMessage = { action in
             if action == "start" {
                 startScan()
@@ -362,7 +315,6 @@ struct ScanView: View {
     }
     
     private func reconnect() {
-        // Use reconnect method which shows reconnecting state
         connectionManager.reconnect(laptopHost: serverHost, port: serverPort, token: token) { success, error in
             if success {
                 statusMessage = "Connected"
@@ -379,7 +331,6 @@ struct ScanView: View {
     }
 
     private func handleBack() {
-        // Check if scan is active - show confirmation if so
         if scanController.isScanning {
             showExitConfirmation = true
         } else {
@@ -387,25 +338,17 @@ struct ScanView: View {
         }
     }
     
-    // Cleanup resources (called on view disappear and before dismiss)
-    // Ensures cleanup happens in all exit paths: back button, swipe down, system gestures
     private func cleanup() {
-        // Prevent multiple cleanup calls
         guard !hasCleanedUp else { return }
         hasCleanedUp = true
         
-        // Stop scanning if active
         if scanController.isScanning {
             scanController.stopScan()
         }
         
-        // Disconnect WebSocket - ensures connection is closed in all exit paths
         connectionManager.disconnect()
-        
-        // Cleanup logged in ScanController and ConnectionManager
     }
     
-    // Cleanup and dismiss (called after confirmation or when safe to leave)
     private func cleanupAndDismiss() {
         cleanup()
         dismiss()
@@ -417,7 +360,6 @@ struct ScanView: View {
         } else if !RoomCaptureSession.isSupported {
             statusMessage = "RoomPlan not supported"
         } else {
-            // Use connection state display name
             statusMessage = connectionManager.statusMessage
         }
     }
@@ -425,13 +367,11 @@ struct ScanView: View {
     private func updateConnectionState() {
         updateStatus()
         
-        // Update wasConnected flag
         if connectionManager.isConnected {
             wasConnected = true
         }
     }
     
-    // Format bytes for display
     private func formatBytes(_ bytes: Int64) -> String {
         if bytes < 1024 {
             return "\(bytes) B"
@@ -451,7 +391,6 @@ struct ScanView: View {
             isReconnecting = false
             
         case .disconnected:
-            // Show reconnect alert if we were previously connected
             if wasConnected {
                 showReconnectAlert = true
                 reconnectError = "Connection lost. Would you like to reconnect?"
@@ -463,7 +402,6 @@ struct ScanView: View {
             
         case .reconnecting:
             isReconnecting = true
-            // Show reconnection attempt in UI
             statusMessage = "Reconnecting..."
             
         case .failed(let error):

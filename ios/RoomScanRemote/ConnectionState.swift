@@ -12,7 +12,7 @@ enum ConnectionState: Equatable {
     case connecting
     case connected
     case reconnecting
-    case failed(String) // Contains error message
+    case failed(String)
     
     var displayName: String {
         switch self {

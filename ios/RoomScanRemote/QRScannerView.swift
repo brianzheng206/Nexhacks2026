@@ -1,4 +1,3 @@
-@ -1,232 +0,0 @@
 //
 //  QRScannerView.swift
 //  RoomScanRemote
@@ -26,7 +25,6 @@ struct QRScannerView: UIViewControllerRepresentable {
     }
     
     func updateUIViewController(_ uiViewController: QRScannerViewController, context: Context) {
-        // No updates needed
     }
     
     func makeCoordinator() -> Coordinator {
@@ -50,8 +48,6 @@ struct QRScannerView: UIViewControllerRepresentable {
                         preferredStyle: .alert
                     )
                     alert.addAction(UIAlertAction(title: "OK", style: .default))
-                    // Note: We can't easily show alert from here without view controller reference
-                    // The error will be handled by the parent view
                 }
             } else {
                 parent.scannedToken = token
@@ -72,10 +68,9 @@ class QRScannerViewController: UIViewController {
     var captureSession: AVCaptureSession?
     var previewLayer: AVCaptureVideoPreviewLayer?
     
-    // Track last scanned value to prevent duplicate scans
     private var lastScannedValue: String?
     private var lastScanTime: Date?
-    private let scanDebounceInterval: TimeInterval = 1.0 // Ignore duplicate scans within 1 second
+    private let scanDebounceInterval: TimeInterval = 1.0
     
     override func viewDidLoad() {
         super.viewDidLoad()
@@ -154,11 +149,10 @@ class QRScannerViewController: UIViewController {
             captureSession.startRunning()
         }
         
-        // Add cancel button with dark theme styling
         let cancelButton = UIButton(type: .system)
         cancelButton.setTitle("Cancel", for: .normal)
         cancelButton.setTitleColor(.white, for: .normal)
-        cancelButton.backgroundColor = UIColor(red: 0.4, green: 0.4, blue: 0.4, alpha: 0.8) // Dark gray with transparency
+        cancelButton.backgroundColor = UIColor(red: 0.4, green: 0.4, blue: 0.4, alpha: 0.8)
         cancelButton.layer.cornerRadius = 12
         cancelButton.titleLabel?.font = UIFont.systemFont(ofSize: 16, weight: .semibold)
         cancelButton.addTarget(self, action: #selector(cancelTapped), for: .touchUpInside)
@@ -172,7 +166,6 @@ class QRScannerViewController: UIViewController {
             cancelButton.heightAnchor.constraint(equalToConstant: 44)
         ])
         
-        // Add instruction label with dark theme styling
         let instructionLabel = UILabel()
         instructionLabel.text = "Point camera at QR code"
         instructionLabel.textColor = .white
@@ -220,11 +213,9 @@ class QRScannerViewController: UIViewController {
             return (token, host, port, nil)
         }
         
-        // Try to parse http://.../download/<token>/room.usdz
         if let url = URL(string: string) {
             let pathComponents = url.pathComponents
             if pathComponents.count >= 3 {
-                // Extract token from path like /download/<token>/room...
                 if let tokenIndex = pathComponents.firstIndex(of: "download"), tokenIndex + 1 < pathComponents.count {
                     let token = pathComponents[tokenIndex + 1]
                     let host = url.host
@@ -236,7 +227,6 @@ class QRScannerViewController: UIViewController {
             }
         }
         
-        // Try to parse as URL with query parameters
         if let url = URL(string: string),
            let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
            let queryItems = components.queryItems {
@@ -248,23 +238,16 @@ class QRScannerViewController: UIViewController {
             return (token, host, url.port, nil)
         }
         
-        // No valid format found
         return (nil, nil, nil, "Invalid QR code format. Expected one of:\n• roomscan://pair?token=<session_token>&host=<server>&port=<port>\n• http://host:port/download/<session_token>/room.usdz\n• http://host:port?token=<session_token>&host=<server>")
     }
 }
 
 extension QRScannerViewController: AVCaptureMetadataOutputObjectsDelegate {
-    // Track last scanned value to prevent duplicate scans
-    private var lastScannedValue: String?
-    private var lastScanTime: Date?
-    private let scanDebounceInterval: TimeInterval = 1.0 // Ignore duplicate scans within 1 second
-    
     func metadataOutput(_ output: AVCaptureMetadataOutput, didOutput metadataObjects: [AVMetadataObject], from connection: AVCaptureConnection) {
         guard let metadataObject = metadataObjects.first else { return }
         guard let readableObject = metadataObject as? AVMetadataMachineReadableCodeObject else { return }
         guard let stringValue = readableObject.stringValue else { return }
         
-        // Debounce: Ignore duplicate scans within debounce interval
         let now = Date()
         if let lastValue = lastScannedValue, lastValue == stringValue,
            let lastTime = lastScanTime, now.timeIntervalSince(lastTime) < scanDebounceInterval {
@@ -275,10 +258,8 @@ extension QRScannerViewController: AVCaptureMetadataOutputObjectsDelegate {
         lastScannedValue = stringValue
         lastScanTime = now
         
-        // Stop scanning to prevent multiple detections
         captureSession?.stopRunning()
         
-        // Parse QR code
         let (token, host, port, error) = parseQRCode(stringValue)
         
         if error == nil && token != nil {

@@ -8,7 +8,6 @@
 import SwiftUI
 
 extension Color {
-    // Dark theme colors matching frontend
     static let appBackground = Color(hex: "1a1a1a")
     static let appPanel = Color(hex: "2d2d2d")
     static let appAccent = Color(hex: "667eea")
@@ -16,13 +15,11 @@ extension Color {
     static let appTextSecondary = Color(hex: "999999")
     static let appBorder = Color(hex: "667eea")
     
-    // Status colors
     static let statusConnected = Color.green
     static let statusScanning = Color(hex: "667eea")
     static let statusError = Color.red
     static let statusWarning = Color.orange
     
-    // Button colors
     static let buttonPrimary = Color(hex: "667eea")
     static let buttonSecondary = Color(hex: "764ba2")
     static let buttonSuccess = Color.green

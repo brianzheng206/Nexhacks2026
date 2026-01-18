@@ -1,4 +1,3 @@
-@ -1,146 +0,0 @@
 //
 //  PairingView.swift
 //  RoomScanRemote
@@ -25,7 +24,6 @@ struct PairingView: View {
     @State private var scannedHost: String?
     @State private var scannedPort: Int?
     
-    // Validation states
     @State private var isServerAddressValid: Bool = true
     @State private var isTokenValid: Bool = true
     @State private var serverAddressValidationMessage: String = ""
@@ -124,7 +122,6 @@ struct PairingView: View {
         }
     }
     
-    // Real-time validation for server address
     private func validateServerAddress(_ address: String) {
         let trimmed = address.trimmingCharacters(in: .whitespacesAndNewlines)
         
@@ -143,7 +140,6 @@ struct PairingView: View {
         }
     }
     
-    // Real-time validation for token
     private func validateToken(_ tokenValue: String) {
         let trimmed = tokenValue.trimmingCharacters(in: .whitespacesAndNewlines)
         
@@ -153,20 +149,16 @@ struct PairingView: View {
             return
         }
         
-        // Token should be non-empty after trimming
         if trimmed.isEmpty {
             isTokenValid = false
             tokenValidationMessage = "Session token cannot be empty or only whitespace"
             return
         }
         
-        // Optional: Add format validation if tokens have a specific format
-        // For now, just check it's not empty
         isTokenValid = true
         tokenValidationMessage = ""
     }
     
-    // Check server reachability before attempting WebSocket connection
     private func checkReachability(host: String, port: Int, completion: @escaping (Bool, String?) -> Void) {
         let urlString = "http://\(host):\(port)/health"
         guard let url = URL(string: urlString) else {
@@ -219,15 +211,12 @@ struct PairingView: View {
             return
         }
         
-        // Prevent multiple simultaneous connection attempts
         guard !isConnecting else {
             return
         }
         
         isConnecting = true
         errorMessage = nil
-        
-        // Reset auto-connect flag when manually connecting
         hasAttemptedAutoConnect = false
         
         guard let parsed = parseServerAddress(serverAddress) else {
@@ -238,7 +227,6 @@ struct PairingView: View {
         serverHost = parsed.host
         serverPort = parsed.port
         
-        // Normalize token trimming at entry point (before passing to WSClient)
         let trimmedToken = token.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedToken.isEmpty else {
             errorMessage = "Session token cannot be empty"
@@ -246,8 +234,6 @@ struct PairingView: View {
             return
         }
         
-        // Check server reachability first
-        // Note: PairingView is a struct, so we don't need [weak self] - structs don't have retain cycles
         checkReachability(host: parsed.host, port: parsed.port) { reachable, error in
             if !reachable {
                 DispatchQueue.main.async {
@@ -257,12 +243,9 @@ struct PairingView: View {
                 return
             }
             
-            // Server is reachable, proceed with WebSocket connection
-            // Call WSClient directly (like the old working version) but also update ConnectionManager state
             let wsClient = WSClient.shared
             wsClient.connect(laptopHost: parsed.host, port: parsed.port, token: trimmedToken) { success, error in
                 DispatchQueue.main.async {
-                    // Update ConnectionManager state to match
                     if success {
                         self.connectionManager.connectionState = .connected
                     } else {
@@ -336,7 +319,6 @@ struct PairingView: View {
     }
 
     private func attemptAutoConnect() {
-        // Prevent multiple connection attempts
         guard !isConnecting, !hasAttemptedAutoConnect else {
             return
         }

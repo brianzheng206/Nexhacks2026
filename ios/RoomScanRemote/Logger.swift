@@ -49,7 +49,6 @@ enum LogLevel {
 struct AppLogger {
     private static let subsystem = Bundle.main.bundleIdentifier ?? "com.roomscan.remote"
     
-    // Enable debug logging only in debug builds
     #if DEBUG
     private static let enableDebugLogging = true
     #else
@@ -75,7 +74,6 @@ struct AppLogger {
         logger.error("\(message, privacy: .public)")
     }
     
-    // Convenience method for logging with automatic token masking
     func log(_ level: LogLevel, _ message: String, maskingTokens: Bool = true) {
         let safeMessage = maskingTokens ? maskTokensInMessage(message) : message
         
@@ -89,12 +87,9 @@ struct AppLogger {
         }
     }
     
-    // Mask tokens in log messages - simple string replacement approach
-    // Note: This is a best-effort approach. Always use maskedForLogging on token strings directly.
     private func maskTokensInMessage(_ message: String) -> String {
         var masked = message
         
-        // Pattern: token='...' or token="..."
         if let range = masked.range(of: "token=['\"]", options: .regularExpression) {
             let start = range.upperBound
             if let end = masked[start...].range(of: "['\"]", options: .regularExpression)?.lowerBound {
@@ -104,7 +99,6 @@ struct AppLogger {
             }
         }
         
-        // Pattern: "token": "..."
         if let range = masked.range(of: "\"token\"\\s*:\\s*[\"']", options: .regularExpression) {
             let start = range.upperBound
             if let end = masked[start...].range(of: "[\"']", options: .regularExpression)?.lowerBound {
@@ -118,7 +112,6 @@ struct AppLogger {
     }
 }
 
-// Global loggers for each category
 extension AppLogger {
     static let connection = AppLogger(category: .connection)
     static let scanning = AppLogger(category: .scanning)
