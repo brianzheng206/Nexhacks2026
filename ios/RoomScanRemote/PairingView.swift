@@ -110,14 +110,14 @@ struct PairingView: View {
             .sheet(isPresented: $showQRScanner) {
                 QRScannerView(scannedToken: $scannedToken, scannedHost: $scannedHost, scannedPort: $scannedPort)
             }
-            .onChange(of: scannedToken) { _, _ in
-                applyScannedValues()
+            .onChange(of: scannedToken) { _, newToken in
+                applyScannedValuesDebounced()
             }
-            .onChange(of: scannedHost) { _, _ in
-                applyScannedValues()
+            .onChange(of: scannedHost) { _, newHost in
+                applyScannedValuesDebounced()
             }
-            .onChange(of: scannedPort) { _, _ in
-                applyScannedValues()
+            .onChange(of: scannedPort) { _, newPort in
+                applyScannedValuesDebounced()
             }
         }
     }
@@ -266,6 +266,32 @@ struct PairingView: View {
         }
     }
 
+    private func applyScannedValuesDebounced() {
+        // Cancel any pending auto-connect
+        autoConnectDebounceTask?.cancel()
+        
+        // Apply scanned values immediately
+        if let scannedTokenValue = scannedToken?.trimmingCharacters(in: .whitespacesAndNewlines), !scannedTokenValue.isEmpty {
+            self.token = scannedTokenValue
+        }
+        if let host = scannedHost?.trimmingCharacters(in: .whitespacesAndNewlines), !host.isEmpty {
+            if let port = scannedPort {
+                serverAddress = "\(host):\(port)"
+            } else {
+                serverAddress = "\(host):\(defaultPort)"
+            }
+        }
+        
+        // Debounce the auto-connect to wait for all values to be set
+        let task = DispatchWorkItem { [self] in
+            DispatchQueue.main.async {
+                self.attemptAutoConnect()
+            }
+        }
+        autoConnectDebounceTask = task
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1, execute: task)
+    }
+    
     private func applyScannedValues() {
         if let token = scannedToken?.trimmingCharacters(in: .whitespacesAndNewlines), !token.isEmpty {
             self.token = token
@@ -319,13 +345,22 @@ struct PairingView: View {
     }
 
     private func attemptAutoConnect() {
-        guard !isConnecting, !hasAttemptedAutoConnect else {
+        // Don't attempt if already connecting or navigating
+        guard !isConnecting, !navigateToScan else {
+            return
+        }
+        
+        // Require both server address and token to be filled
+        guard !serverAddress.isEmpty, !token.isEmpty else {
+            return
+        }
+        
+        // Only attempt auto-connect once per QR scan
+        guard !hasAttemptedAutoConnect else {
             return
         }
         
         hasAttemptedAutoConnect = true
-        guard !isConnecting, !navigateToScan else { return }
-        guard !serverAddress.isEmpty, !token.isEmpty else { return }
         connect()
     }
 }
