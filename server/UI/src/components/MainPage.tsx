@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { useSearchParams, useNavigate } from 'react-router-dom';
 import {
-  ArrowLeft, Play, Square, Download, Wifi, WifiOff, Plus, Activity,
+  ArrowLeft, Play, Square, Download, Wifi, WifiOff, Activity,
   Box, Scan, Layers, Sparkles,
 } from 'lucide-react';
 import Mesh3DViewer from './Mesh3DViewer';
@@ -261,18 +261,6 @@ export default function MainPage() {
     };
   }, [token, connectWebSocket, laptopIP]);
 
-  const createSession = async () => {
-    try {
-      const res = await fetch('/new');
-      if (!res.ok) throw new Error();
-      const d = await res.json();
-      setToken(d.token);
-      setLaptopIP(d.laptopIP);
-      if (Array.isArray(d.availableIPs)) setAvailableIPs(d.availableIPs);
-      navigate(`/?token=${d.token}`);
-    } catch {}
-  };
-
   const handleBack = () => {
     if (previewImageSrc) {
       URL.revokeObjectURL(previewImageSrc);
@@ -350,12 +338,8 @@ export default function MainPage() {
 
           {/* CTA */}
           <div className="flex flex-col gap-3 max-w-xs mx-auto animate-fade-in delay-6">
-            <button onClick={createSession} className="btn btn-primary py-4 text-base">
-              <Plus className="w-5 h-5" strokeWidth={2} />
-              Start Scanning
-            </button>
-            <button onClick={() => navigate('/new')} className="btn btn-secondary py-3">
-              <Scan className="w-4 h-4" strokeWidth={2} />
+            <button onClick={() => navigate('/new')} className="btn btn-primary py-4 text-base">
+              <Scan className="w-5 h-5" strokeWidth={2} />
               QR Setup
             </button>
           </div>
