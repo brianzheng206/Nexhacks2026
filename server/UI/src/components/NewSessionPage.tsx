@@ -33,6 +33,35 @@ export default function NewSessionPage() {
       .catch(() => setStatus({ message: 'Failed to create session.', type: 'error' }));
   }, [existingToken]);
 
+  // Auto-navigate to console when phone connects after QR scan
+  useEffect(() => {
+    if (!token) return;
+
+    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const ws = new WebSocket(`${protocol}//${window.location.host}`);
+
+    ws.onopen = () => {
+      ws.send(JSON.stringify({ type: 'hello', role: 'ui', token }));
+    };
+
+    ws.onmessage = (e) => {
+      if (typeof e.data === 'string') {
+        try {
+          const msg = JSON.parse(e.data);
+          if (msg.type === 'status' && msg.value === 'phone_connected') {
+            navigate(`/?token=${token}`);
+          }
+        } catch {
+          // Ignore parse errors
+        }
+      }
+    };
+
+    return () => {
+      ws.close();
+    };
+  }, [token, navigate]);
+
   const checkUpload = async () => {
     if (!token) return setStatus({ message: 'No token', type: 'error' });
     setStatus({ message: 'Checking...', type: 'info' });
