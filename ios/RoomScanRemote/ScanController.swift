@@ -1,3 +1,4 @@
+@ -1,387 +0,0 @@
 //
 //  ScanController.swift
 //  RoomScanRemote
@@ -18,9 +19,7 @@ class ScanController: NSObject, ObservableObject {
     
     private var roomCaptureSession: RoomCaptureSession?
     private var lastUpdateTime: TimeInterval = 0
-    private var lastFrameTime: TimeInterval = 0
     private let updateInterval: TimeInterval = 0.2 // 5Hz = 200ms for room updates
-    private let frameInterval: TimeInterval = 0.1 // 10 fps = 100ms for preview frames
     
     var token: String?
     
@@ -331,57 +330,7 @@ extension ScanController: RoomCaptureSessionDelegate {
 
 extension ScanController: ARSessionDelegate {
     func session(_ session: ARSession, didUpdate frame: ARFrame) {
-        // Throttle to ~10 fps
-        let currentTime = Date().timeIntervalSince1970
-        guard currentTime - lastFrameTime >= frameInterval else { return }
-        lastFrameTime = currentTime
-        
-        // Convert CVPixelBuffer to JPEG Data on background queue to avoid blocking
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            guard let self = self else { return }
-            
-            guard let jpegData = self.convertPixelBufferToJPEG(frame.capturedImage) else {
-                // Conversion failed, skip this frame (error already logged)
-                return
-            }
-            
-            // Send as binary WebSocket message
-            WSClient.shared.sendJPEGFrame(jpegData)
-        }
-    }
-    
-    private func convertPixelBufferToJPEG(_ pixelBuffer: CVPixelBuffer) -> Data? {
-        do {
-            // Create CIImage from CVPixelBuffer
-            let ciImage = CIImage(cvPixelBuffer: pixelBuffer)
-            
-            // Create CIContext with options for better performance
-            let context = CIContext(options: [
-                .useSoftwareRenderer: false,
-                .workingColorSpace: NSNull()
-            ])
-            
-            // Convert to CGImage
-            guard let cgImage = context.createCGImage(ciImage, from: ciImage.extent) else {
-                print("[ScanController] Failed to create CGImage from CIImage")
-                return nil
-            }
-            
-            // Convert to UIImage
-            // ARFrame images are typically in landscape orientation, adjust as needed
-            let uiImage = UIImage(cgImage: cgImage, scale: 1.0, orientation: .right)
-            
-            // Convert to JPEG Data with compression quality (0.7 = good balance of quality/size)
-            guard let jpegData = uiImage.jpegData(compressionQuality: 0.7) else {
-                print("[ScanController] Failed to convert UIImage to JPEG")
-                return nil
-            }
-            
-            return jpegData
-        } catch {
-            // Safeguard: catch any errors during conversion
-            print("[ScanController] Error converting pixel buffer to JPEG: \(error)")
-            return nil
-        }
+        // JPEG streaming removed - mesh reconstruction is displayed instead
+        // No need to process frames for preview streaming
     }
 }

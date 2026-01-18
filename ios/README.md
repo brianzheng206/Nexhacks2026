@@ -1,3 +1,4 @@
+@ -1,70 +0,0 @@
 # RoomScanRemote iOS App
 
 Minimal Swift iOS app for RoomScan Remote MVP.

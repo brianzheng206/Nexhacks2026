@@ -1,3 +1,4 @@
+@ -1,208 +0,0 @@
 //
 //  ScanView.swift
 //  RoomScanRemote

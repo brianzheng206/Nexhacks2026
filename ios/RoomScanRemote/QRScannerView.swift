@@ -1,3 +1,4 @@
+@ -1,232 +0,0 @@
 //
 //  QRScannerView.swift
 //  RoomScanRemote
