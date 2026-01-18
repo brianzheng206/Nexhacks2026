@@ -7,26 +7,22 @@
 
 import SwiftUI
 import RoomPlan
-import ARKit
-import RealityKit
 
-// MARK: - ARView Wrapper for SwiftUI
-// Uses ARView to display the AR camera feed with RoomPlan overlay
+// MARK: - RoomCaptureView Wrapper for SwiftUI
+// Uses RoomCaptureView to show live RoomPlan reconstruction.
 
-struct ARViewRepresentable: UIViewRepresentable {
-    let arSession: ARSession?
+struct RoomCaptureViewRepresentable: UIViewRepresentable {
+    let captureSession: RoomCaptureSession?
     
-    func makeUIView(context: Context) -> ARView {
-        let arView = ARView(frame: .zero)
-        // Configure ARView to show camera feed
-        arView.session = arSession ?? ARSession()
-        return arView
+    func makeUIView(context: Context) -> RoomCaptureView {
+        let roomCaptureView = RoomCaptureView(frame: .zero)
+        roomCaptureView.captureSession = captureSession
+        return roomCaptureView
     }
     
-    func updateUIView(_ uiView: ARView, context: Context) {
-        // Update the AR session if it changes
-        if let session = arSession, uiView.session !== session {
-            uiView.session = session
+    func updateUIView(_ uiView: RoomCaptureView, context: Context) {
+        if uiView.captureSession !== captureSession {
+            uiView.captureSession = captureSession
         }
     }
 }
@@ -61,6 +57,7 @@ struct ScanView: View {
     let serverPort: Int
     let token: String
     
+    @Environment(\.dismiss) private var dismiss
     @StateObject private var scanController = ScanController()
     
     init(serverHost: String, serverPort: Int, token: String) {
@@ -85,9 +82,8 @@ struct ScanView: View {
                 // 3D Room Capture View - takes up most of the screen
                 ZStack {
                     if scanController.isScanning, let session = scanController.roomCaptureSession {
-                        // Show the AR camera feed with RoomPlan overlay
-                        // RoomPlan automatically overlays the 3D room reconstruction on the ARSession
-                        ARViewRepresentable(arSession: session.arSession)
+                        // Show the RoomPlan live reconstruction view.
+                        RoomCaptureViewRepresentable(captureSession: session)
                             .ignoresSafeArea(edges: .horizontal)
                     } else {
                         // Placeholder when not scanning
@@ -140,6 +136,18 @@ struct ScanView: View {
     
     private var headerView: some View {
         HStack {
+            Button(action: handleBack) {
+                HStack(spacing: 6) {
+                    Image(systemName: "chevron.left")
+                    Text("Back")
+                }
+                .font(.subheadline)
+                .padding(.vertical, 6)
+                .padding(.horizontal, 10)
+                .background(Color.gray.opacity(0.15))
+                .cornerRadius(10)
+            }
+
             Text("RoomScan Remote")
                 .font(.headline)
                 .fontWeight(.bold)
@@ -313,6 +321,12 @@ struct ScanView: View {
                 }
             }
         }
+    }
+
+    private func handleBack() {
+        scanController.stopScan()
+        WSClient.shared.disconnect()
+        dismiss()
     }
     
     private func updateStatus() {

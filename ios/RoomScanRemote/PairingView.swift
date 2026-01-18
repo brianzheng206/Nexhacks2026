@@ -150,16 +150,17 @@ struct PairingView: View {
     }
 
     private func applyScannedValues() {
-        if let token = scannedToken {
+        if let token = scannedToken?.trimmingCharacters(in: .whitespacesAndNewlines), !token.isEmpty {
             self.token = token
         }
-        if let host = scannedHost {
+        if let host = scannedHost?.trimmingCharacters(in: .whitespacesAndNewlines), !host.isEmpty {
             if let port = scannedPort {
                 serverAddress = "\(host):\(port)"
             } else {
                 serverAddress = host
             }
         }
+        attemptAutoConnect()
     }
 
     private func parseServerAddress(_ input: String) -> (host: String, port: Int)? {
@@ -198,5 +199,11 @@ struct PairingView: View {
         }
 
         return (trimmed, defaultPort)
+    }
+
+    private func attemptAutoConnect() {
+        guard !isConnecting, !navigateToScan else { return }
+        guard !serverAddress.isEmpty, !token.isEmpty else { return }
+        connect()
     }
 }

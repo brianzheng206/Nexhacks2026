@@ -23,6 +23,7 @@ class ScanController: NSObject, ObservableObject {
     private let frameInterval: TimeInterval = 0.1 // 10 fps = 100ms for preview frames
     private var lastMeshUpdateTime: TimeInterval = 0
     private let meshUpdateInterval: TimeInterval = 0.5 // 2Hz = 500ms for mesh updates (lower frequency due to size)
+    private let enableMeshStreaming = false
     
     // Reusable CIContext for JPEG conversion - creating this once prevents flickering
     // CIContext is heavyweight and expensive to create; reusing it is critical for performance
@@ -63,13 +64,6 @@ class ScanController: NSObject, ObservableObject {
         // Set ARSession delegate for frame capture
         roomCaptureSession.arSession.delegate = self
         
-        // Enable scene reconstruction for detailed mesh with classification
-        // This gives us colored, detailed mesh instead of just boxes
-        let arConfig = ARWorldTrackingConfiguration()
-        arConfig.sceneReconstruction = .meshWithClassification // Enables detailed mesh with semantic colors
-        arConfig.planeDetection = [.horizontal, .vertical]
-        roomCaptureSession.arSession.run(arConfig, options: [.resetTracking, .removeExistingAnchors])
-        
         // Configure RoomPlan with coaching enabled
         var configuration = RoomCaptureSession.Configuration()
         configuration.isCoachingEnabled = true
@@ -81,6 +75,7 @@ class ScanController: NSObject, ObservableObject {
             self.isScanning = true
             self.errorMessage = nil
         }
+        sendStatusMessage(value: "scan_started")
         print("[ScanController] Scan started")
     }
     
@@ -95,6 +90,7 @@ class ScanController: NSObject, ObservableObject {
         DispatchQueue.main.async {
             self.isScanning = false
         }
+        sendStatusMessage(value: "scan_stopped")
         print("[ScanController] Scan stopped")
     }
     
@@ -356,6 +352,7 @@ extension ScanController: RoomCaptureSessionDelegate {
 
 extension ScanController: ARSessionDelegate {
     func session(_ session: ARSession, didAdd anchors: [ARAnchor]) {
+        guard enableMeshStreaming else { return }
         // Handle mesh anchors for detailed 3D reconstruction
         for anchor in anchors {
             if let meshAnchor = anchor as? ARMeshAnchor {
@@ -365,6 +362,7 @@ extension ScanController: ARSessionDelegate {
     }
     
     func session(_ session: ARSession, didUpdate anchors: [ARAnchor]) {
+        guard enableMeshStreaming else { return }
         // Update mesh anchors as they refine
         let currentTime = Date().timeIntervalSince1970
         guard currentTime - lastMeshUpdateTime >= meshUpdateInterval else { return }
@@ -378,6 +376,7 @@ extension ScanController: ARSessionDelegate {
     }
     
     func session(_ session: ARSession, didUpdate frame: ARFrame) {
+        guard WSClient.shared.isConnected else { return }
         // Throttle to ~10 fps
         let currentTime = Date().timeIntervalSince1970
         guard currentTime - lastFrameTime >= frameInterval else { return }
@@ -452,14 +451,15 @@ extension ScanController: ARSessionDelegate {
             return
         }
         
-        // Extract vertices from ARGeometrySource buffer - verified API
+        // Extract vertices from ARGeometrySource buffer
         var vertexArray: [[Float]] = []
-        let vertexBuffer = vertexSource.buffer
-        let vertexPointer = vertexBuffer.contents().assumingMemoryBound(to: SIMD3<Float>.self)
-        let vertexStride = vertexSource.stride / MemoryLayout<SIMD3<Float>>.size
+        let vertexBuffer = vertexSource.buffer.contents()
+        let vertexOffset = vertexSource.offset
+        let vertexStride = vertexSource.stride
         
         for i in 0..<vertexCount {
-            let vertex = vertexPointer[i * vertexStride]
+            let pointer = vertexBuffer.advanced(by: vertexOffset + i * vertexStride)
+            let vertex = pointer.assumingMemoryBound(to: SIMD3<Float>.self).pointee
             vertexArray.append([vertex.x, vertex.y, vertex.z])
         }
         
@@ -469,20 +469,29 @@ extension ScanController: ARSessionDelegate {
         let faceCount = faceElement.count
         var faceArray: [[Int]] = []
         
-        // Extract face indices from ARGeometryElement buffer - verified API
-        let faceBuffer = faceElement.buffer
-        let facePointer = faceBuffer.contents().assumingMemoryBound(to: UInt32.self)
-        let indicesPerPrimitive = faceElement.indicesPerPrimitive // Should be 3 for triangles
-        let faceStride = faceElement.stride / MemoryLayout<UInt32>.size
+        // Extract face indices from ARGeometryElement buffer
+        let faceBuffer = faceElement.buffer.contents()
+        let faceOffset = faceElement.offset
+        let faceStride = faceElement.stride
+        let bytesPerIndex = faceElement.bytesPerIndex
+        let indicesPerPrimitive = faceElement.indexCountPerPrimitive
         
         for i in 0..<faceCount {
-            let baseIndex = i * faceStride * indicesPerPrimitive
-            if baseIndex + 2 < faceElement.count * faceStride * indicesPerPrimitive {
-                faceArray.append([
-                    Int(facePointer[baseIndex]),
-                    Int(facePointer[baseIndex + 1]),
-                    Int(facePointer[baseIndex + 2])
-                ])
+            let base = faceBuffer.advanced(by: faceOffset + i * faceStride)
+            var indices: [Int] = []
+            indices.reserveCapacity(indicesPerPrimitive)
+            for j in 0..<indicesPerPrimitive {
+                let indexOffset = j * bytesPerIndex
+                if bytesPerIndex == 2 {
+                    let value = base.load(fromByteOffset: indexOffset, as: UInt16.self)
+                    indices.append(Int(value))
+                } else {
+                    let value = base.load(fromByteOffset: indexOffset, as: UInt32.self)
+                    indices.append(Int(value))
+                }
+            }
+            if indices.count >= 3 {
+                faceArray.append([indices[0], indices[1], indices[2]])
             }
         }
         
@@ -490,29 +499,20 @@ extension ScanController: ARSessionDelegate {
         // classificationOf(faceWithIndex:) is a verified API
         var colorArray: [[Float]] = []
         
-        // For each vertex, find which faces use it and get their classification
+        // For each vertex, sample faces to estimate classification
+        let maxFacesToSample = min(faceArray.count, 200)
         for vertexIndex in 0..<vertexCount {
-            var classifications: [ARMeshClassification] = []
+            var classification: ARMeshClassification = .none
             
-            // Sample faces to find which ones use this vertex
-            for faceIndex in 0..<min(faceCount, 100) { // Limit for performance
-                // Get face indices for this face
-                let baseIndex = faceIndex * faceStride * indicesPerPrimitive
-                let v0 = Int(facePointer[baseIndex])
-                let v1 = Int(facePointer[baseIndex + 1])
-                let v2 = Int(facePointer[baseIndex + 2])
-                
-                // Check if this vertex is part of this face
-                if v0 == vertexIndex || v1 == vertexIndex || v2 == vertexIndex {
-                    // Get classification using verified API
-                    let classification = geometry.classificationOf(faceWithIndex: faceIndex)
-                    classifications.append(classification)
+            for faceIndex in 0..<maxFacesToSample {
+                let face = faceArray[faceIndex]
+                if face.contains(vertexIndex) {
+                    classification = geometry.classificationOf(faceWithIndex: faceIndex)
+                    break
                 }
             }
             
-            // Use most common classification, or default
-            let mostCommon = classifications.first ?? .none
-            let color = getColorForClassification(mostCommon)
+            let color = getColorForClassification(classification)
             colorArray.append([color.r, color.g, color.b, 1.0])
         }
         
