@@ -1,54 +1,33 @@
-import React, { useState, useEffect } from 'react';
+import { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
-import {
-  ArrowLeft,
-  Copy,
-  Check,
-  Wifi,
-  Server,
-  Key,
-  AlertCircle,
-  Smartphone,
-} from 'lucide-react';
+import { ArrowLeft, Copy, Check, Wifi, Server, Key, AlertCircle, Smartphone } from 'lucide-react';
 
-const PairingPage: React.FC = () => {
+export default function PairingPage() {
   const [qrDataUrl, setQrDataUrl] = useState<string | null>(null);
   const [token, setToken] = useState<string | null>(null);
-  const [laptopIP, setLaptopIP] = useState<string>('Loading...');
-  const [status, setStatus] = useState<{ message: string; type: 'error' } | null>(null);
+  const [laptopIP, setLaptopIP] = useState('Loading...');
+  const [error, setError] = useState<string | null>(null);
   const [copiedToken, setCopiedToken] = useState(false);
   const [copiedIP, setCopiedIP] = useState(false);
   const navigate = useNavigate();
 
   useEffect(() => {
-    const loadPairingInfo = async () => {
-      try {
-        const response = await fetch('/new');
-        if (!response.ok) {
-          throw new Error('Failed to load pairing info');
-        }
-
-        const data = await response.json();
+    fetch('/new')
+      .then(res => {
+        if (!res.ok) throw new Error('Failed');
+        return res.json();
+      })
+      .then(data => {
         setQrDataUrl(data.qrDataUrl);
         setToken(data.token);
-
         const url = new URL(data.url);
-        const currentHostname = window.location.hostname;
-        const ipToDisplay =
-          currentHostname === 'localhost' || currentHostname === '127.0.0.1'
-            ? url.hostname
-            : currentHostname;
-        setLaptopIP(ipToDisplay);
-      } catch (error: any) {
-        console.error('Error loading pairing info:', error);
-        setStatus({ message: 'Failed to load pairing info: ' + error.message, type: 'error' });
-      }
-    };
-
-    loadPairingInfo();
+        const host = window.location.hostname;
+        setLaptopIP(host === 'localhost' || host === '127.0.0.1' ? url.hostname : host);
+      })
+      .catch(e => setError(e.message));
   }, []);
 
-  const copyToClipboard = async (text: string, type: 'token' | 'ip') => {
+  const copy = async (text: string, type: 'token' | 'ip') => {
     await navigator.clipboard.writeText(text);
     if (type === 'token') {
       setCopiedToken(true);
@@ -61,133 +40,111 @@ const PairingPage: React.FC = () => {
 
   return (
     <div className="min-h-screen bg-animated-gradient flex items-center justify-center p-6">
-      <div className="max-w-2xl w-full">
+      <div className="max-w-lg w-full">
         {/* Header */}
         <div className="text-center mb-10">
-          <div className="inline-flex items-center justify-center w-16 h-16 rounded-2xl bg-gradient-to-br from-[hsl(var(--primary))] to-[hsl(var(--accent))] mb-6">
-            <Smartphone className="w-8 h-8 text-white" />
+          <div className="inline-flex items-center justify-center w-16 h-16 rounded-2xl bg-gradient-to-b from-white/15 to-white/5 border border-white/10 mb-6">
+            <Smartphone className="w-8 h-8 text-white/80" strokeWidth={1.5} />
           </div>
-          <h1 className="text-4xl font-bold mb-3">
-            <span className="gradient-text">Device Pairing</span>
+          <h1 className="text-4xl font-semibold tracking-tight mb-3">
+            <span className="gradient-text">Pairing</span>
           </h1>
-          <p className="text-lg text-muted-foreground max-w-md mx-auto">
-            Connect your iOS device using QR code or manual entry
+          <p className="text-lg text-white/40">
+            Connect via QR or manual entry
           </p>
         </div>
 
         {/* Main Card */}
         <div className="glass-card-strong rounded-3xl p-8">
-          {/* QR Code Section */}
+          {/* QR */}
           <div className="flex flex-col items-center mb-8">
-            <h2 className="text-sm font-semibold text-muted-foreground uppercase tracking-wider mb-6">
-              Scan QR Code
-            </h2>
+            <p className="text-xs font-medium text-white/40 uppercase tracking-wider mb-5">Scan QR</p>
             {qrDataUrl ? (
-              <div className="qr-container pulse-glow">
-                <img src={qrDataUrl} alt="QR Code" className="w-52 h-52 rounded-xl" />
+              <div className="qr-container">
+                <img src={qrDataUrl} alt="QR" className="w-44 h-44 rounded-xl" />
               </div>
             ) : (
-              <div className="w-52 h-52 rounded-2xl bg-secondary shimmer" />
+              <div className="w-44 h-44 rounded-2xl shimmer" />
             )}
           </div>
 
           {/* Divider */}
           <div className="flex items-center gap-4 mb-8">
-            <div className="flex-1 h-px bg-border" />
-            <span className="text-sm text-muted-foreground">or enter manually</span>
-            <div className="flex-1 h-px bg-border" />
+            <div className="flex-1 h-px bg-white/10" />
+            <span className="text-xs text-white/30">or manually</span>
+            <div className="flex-1 h-px bg-white/10" />
           </div>
 
           {/* Connection Info */}
           <div className="space-y-4">
-            {/* Server IP */}
-            <div className="glass-card rounded-2xl p-5 transition-smooth hover:border-[hsla(var(--primary),0.3)]">
+            {/* Server */}
+            <div className="glass rounded-2xl p-4">
               <div className="flex items-center gap-3 mb-3">
-                <div className="w-10 h-10 rounded-xl bg-[hsla(var(--primary),0.15)] flex items-center justify-center">
-                  <Server className="w-5 h-5 text-[hsl(var(--primary))]" />
+                <div className="w-9 h-9 rounded-xl bg-white/5 flex items-center justify-center">
+                  <Server className="w-4 h-4 text-white/60" />
                 </div>
                 <div>
-                  <p className="text-xs text-muted-foreground uppercase tracking-wider">Server Address</p>
-                  <p className="text-sm text-foreground">Enter this in your iOS app</p>
+                  <p className="text-[10px] text-white/30 uppercase">Server</p>
+                  <p className="text-sm text-white/70">Enter in iOS app</p>
                 </div>
               </div>
-              <div className="flex items-center justify-between gap-3 bg-secondary rounded-xl px-4 py-3">
-                <code className="font-mono text-lg text-[hsl(var(--primary))]">{laptopIP}:8080</code>
-                <button
-                  onClick={() => copyToClipboard(`${laptopIP}:8080`, 'ip')}
-                  className="btn btn-ghost p-2"
-                  title="Copy IP address"
-                >
-                  {copiedIP ? (
-                    <Check className="w-4 h-4 text-[hsl(var(--success))]" />
-                  ) : (
-                    <Copy className="w-4 h-4" />
-                  )}
+              <div className="flex items-center justify-between gap-2 bg-black/30 rounded-xl px-4 py-3">
+                <code className="font-mono text-white/80">{laptopIP}:8080</code>
+                <button onClick={() => copy(`${laptopIP}:8080`, 'ip')} className="btn btn-ghost p-2">
+                  {copiedIP ? <Check className="w-4 h-4 text-green-400" /> : <Copy className="w-4 h-4" />}
                 </button>
               </div>
             </div>
 
-            {/* Session Token */}
-            <div className="glass-card rounded-2xl p-5 transition-smooth hover:border-[hsla(var(--accent),0.3)]">
+            {/* Token */}
+            <div className="glass rounded-2xl p-4">
               <div className="flex items-center gap-3 mb-3">
-                <div className="w-10 h-10 rounded-xl bg-[hsla(var(--accent),0.15)] flex items-center justify-center">
-                  <Key className="w-5 h-5 text-[hsl(var(--accent))]" />
+                <div className="w-9 h-9 rounded-xl bg-white/5 flex items-center justify-center">
+                  <Key className="w-4 h-4 text-white/60" />
                 </div>
                 <div>
-                  <p className="text-xs text-muted-foreground uppercase tracking-wider">Session Token</p>
-                  <p className="text-sm text-foreground">Unique identifier for this session</p>
+                  <p className="text-[10px] text-white/30 uppercase">Token</p>
+                  <p className="text-sm text-white/70">Session identifier</p>
                 </div>
               </div>
-              <div className="flex items-center justify-between gap-3 bg-secondary rounded-xl px-4 py-3">
-                <code className="font-mono text-sm text-[hsl(var(--accent))] truncate">
-                  {token || 'Loading...'}
-                </code>
+              <div className="flex items-center justify-between gap-2 bg-black/30 rounded-xl px-4 py-3">
+                <code className="font-mono text-sm text-white/80 truncate">{token || '...'}</code>
                 {token && (
-                  <button
-                    onClick={() => copyToClipboard(token, 'token')}
-                    className="btn btn-ghost p-2 flex-shrink-0"
-                    title="Copy token"
-                  >
-                    {copiedToken ? (
-                      <Check className="w-4 h-4 text-[hsl(var(--success))]" />
-                    ) : (
-                      <Copy className="w-4 h-4" />
-                    )}
+                  <button onClick={() => copy(token, 'token')} className="btn btn-ghost p-2">
+                    {copiedToken ? <Check className="w-4 h-4 text-green-400" /> : <Copy className="w-4 h-4" />}
                   </button>
                 )}
               </div>
             </div>
           </div>
 
-          {/* Tips */}
-          <div className="mt-6 p-4 rounded-xl bg-[hsla(var(--primary),0.05)] border border-[hsla(var(--primary),0.1)]">
+          {/* Tip */}
+          <div className="mt-6 p-4 rounded-xl bg-white/[0.03] border border-white/5">
             <div className="flex items-start gap-3">
-              <Wifi className="w-5 h-5 text-[hsl(var(--primary))] mt-0.5 flex-shrink-0" />
-              <p className="text-sm text-muted-foreground">
-                Make sure your iOS device and this computer are connected to the same Wi-Fi network for the connection to work.
+              <Wifi className="w-4 h-4 text-white/40 mt-0.5" />
+              <p className="text-sm text-white/40">
+                Both devices must be on the same Wi-Fi network.
               </p>
             </div>
           </div>
         </div>
 
-        {/* Error Status */}
-        {status && (
-          <div className="mt-6 glass-card rounded-2xl p-4 flex items-center gap-3 border-[hsl(var(--destructive))] bg-[hsla(var(--destructive),0.1)]">
-            <AlertCircle className="w-5 h-5 text-[hsl(var(--destructive))]" />
-            <p className="text-[hsl(var(--destructive))]">{status.message}</p>
+        {/* Error */}
+        {error && (
+          <div className="mt-6 glass rounded-xl p-4 flex items-center gap-3 border border-red-500/30">
+            <AlertCircle className="w-5 h-5 text-red-400" />
+            <p className="text-red-400">{error}</p>
           </div>
         )}
 
-        {/* Back Button */}
+        {/* Back */}
         <div className="text-center mt-8">
           <button onClick={() => navigate('/')} className="btn btn-secondary">
-            <ArrowLeft className="w-4 h-4 mr-2" />
-            Back to Dashboard
+            <ArrowLeft className="w-4 h-4" />
+            Back
           </button>
         </div>
       </div>
     </div>
   );
-};
-
-export default PairingPage;
+}
