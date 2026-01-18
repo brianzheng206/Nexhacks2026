@@ -189,7 +189,7 @@ wss.on('connection', (ws, req) => {
           return;
         } else if (role === 'phone') {
           // Messages from phone to UI
-          const allowedTypes = ['room_update', 'instruction', 'status'];
+          const allowedTypes = ['room_update', 'instruction', 'status', 'mesh_update'];
           if (allowedTypes.includes(message.type)) {
             console.log(`[Relay] Phone -> UI (${message.type}) in session ${token}`);
             sendToUI(token, message);

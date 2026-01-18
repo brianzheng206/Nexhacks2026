@@ -4,6 +4,7 @@ import {
   Play, Square, Download, Wifi, WifiOff, Plus, Activity,
   Box, Scan, Layers, Sparkles,
 } from 'lucide-react';
+import Mesh3DViewer from './Mesh3DViewer';
 
 const MAX_RECONNECT_ATTEMPTS = 10;
 const RECONNECT_DELAY = 3000;
@@ -41,6 +42,7 @@ export default function MainPage() {
   const [floorplanData, setFloorplanData] = useState<any[]>([]);
   const [isScanning, setIsScanning] = useState(false);
   const [roomStats, setRoomStats] = useState<any>(null);
+  const [meshData, setMeshData] = useState<Map<string, any>>(new Map()); // Store mesh anchors by ID
 
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectAttemptsRef = useRef(0);
@@ -163,6 +165,22 @@ export default function MainPage() {
             if (d.walls?.length) {
               setFloorplanData(d.walls);
               setIsScanning(true); // Show scanning indicator when walls are being detected
+            }
+          } else if (d.type === 'mesh_update') {
+            // Handle detailed 3D mesh with colors
+            if (d.anchorId && d.vertices && d.faces && d.colors) {
+              setMeshData(prev => {
+                const updated = new Map(prev);
+                updated.set(d.anchorId, {
+                  vertices: d.vertices,
+                  faces: d.faces,
+                  colors: d.colors,
+                  transform: d.transform,
+                  timestamp: d.t
+                });
+                return updated;
+              });
+              setIsScanning(true);
             }
           } else if (d.type === 'status') {
             setPhoneConnected(d.value === 'phone_connected');
@@ -306,21 +324,26 @@ export default function MainPage() {
       <div className="flex flex-1 overflow-hidden">
         <div className="flex-1 p-4">
           <div className="glass-card-strong rounded-2xl w-full h-full overflow-hidden relative">
-            <div className="absolute inset-0 flex items-center justify-center bg-black/50">
-              {previewImageSrc && <img ref={previewImageRef} src={previewImageSrc} alt="" className="max-w-full max-h-full object-contain" />}
-              <canvas ref={floorplanCanvasRef} className="w-full h-full" />
-              {!previewImageSrc && !floorplanData.length && (
-                <div className="text-center">
-                  <div className="w-16 h-16 rounded-2xl bg-white/5 flex items-center justify-center mx-auto mb-4">
-                    <Scan className="w-8 h-8 text-white/20" strokeWidth={1.5} />
+            {/* 3D Mesh Viewer - shows detailed colored mesh */}
+            {meshData.size > 0 ? (
+              <Mesh3DViewer meshData={meshData} className="w-full h-full" />
+            ) : (
+              <div className="absolute inset-0 flex items-center justify-center bg-black/50">
+                {previewImageSrc && <img ref={previewImageRef} src={previewImageSrc} alt="" className="max-w-full max-h-full object-contain" />}
+                <canvas ref={floorplanCanvasRef} className="w-full h-full" />
+                {!previewImageSrc && !floorplanData.length && (
+                  <div className="text-center">
+                    <div className="w-16 h-16 rounded-2xl bg-white/5 flex items-center justify-center mx-auto mb-4">
+                      <Scan className="w-8 h-8 text-white/20" strokeWidth={1.5} />
+                    </div>
+                    <p className="text-white/30">Awaiting scan</p>
+                    <p className="text-white/15 text-sm mt-1">Connect device to begin</p>
                   </div>
-                  <p className="text-white/30">Awaiting scan</p>
-                  <p className="text-white/15 text-sm mt-1">Connect device to begin</p>
-                </div>
-              )}
-            </div>
+                )}
+              </div>
+            )}
             {isScanning && (
-              <div className="absolute top-4 left-4 badge badge-info status-pulse">
+              <div className="absolute top-4 left-4 badge badge-info status-pulse z-10">
                 <Activity className="w-3 h-3" />
                 Scanning
               </div>
