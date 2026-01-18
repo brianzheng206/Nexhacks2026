@@ -14,6 +14,10 @@ const wss = new WebSocket.Server({ server });
 
 const PORT = 8080;
 const UPLOADS_DIR = path.join(__dirname, 'uploads');
+// Try multiple possible paths for mesh data
+const DATA_DIR = fs.existsSync(path.join(__dirname, '..', 'laptop', 'server', 'data'))
+  ? path.join(__dirname, '..', 'laptop', 'server', 'data')
+  : path.join(__dirname, 'data'); // Fallback to local data directory
 
 // Ensure uploads directory exists
 if (!fs.existsSync(UPLOADS_DIR)) {
@@ -155,20 +159,10 @@ wss.on('connection', (ws, req) => {
   // Handle incoming messages
   ws.on('message', (data, isBinary) => {
     if (isBinary) {
-      // Binary JPEG frame from phone - relay to all UI clients
-      if (role === 'phone' && token && session) {
-        let sentCount = 0;
-        session.uiWsSet.forEach((uiWs) => {
-          if (uiWs.readyState === WebSocket.OPEN) {
-            uiWs.send(data);
-            sentCount++;
-          }
-        });
-        if (sentCount > 0) {
-          console.log(`[Relay] Forwarded JPEG frame to ${sentCount} UI client(s) in session ${token}`);
-        }
-      } else {
-        console.warn(`[WebSocket] Received binary data from unauthenticated client or non-phone role`);
+      // Binary messages no longer used - mesh is displayed via HTTP polling instead of JPEG streaming
+      // Ignore binary messages to reduce server load
+      if (role === 'phone' && token) {
+        // Silently ignore - no longer relaying JPEG frames
       }
     } else {
       // Text message - handle protocol messages
@@ -463,6 +457,50 @@ app.get('/download/:token/room.usdz', (req, res) => {
       if (!res.headersSent) {
         res.status(500).json({ error: 'Download failed' });
       }
+    }
+  });
+});
+
+// GET /mesh?token=... - Serve PLY mesh file for real-time reconstruction display
+app.get('/mesh', (req, res) => {
+  const token = req.query.token;
+  
+  // Validation
+  if (!token || typeof token !== 'string') {
+    return res.status(400).json({ error: 'Invalid or missing token' });
+  }
+
+  // Try to find mesh file in data directory (from worker service)
+  const meshPath = path.join(DATA_DIR, token, 'mesh', 'latest.ply');
+  
+  if (!fs.existsSync(meshPath)) {
+    return res.status(404).json({ error: 'Mesh not available yet' });
+  }
+
+  // Get file stats for ETag
+  const stats = fs.statSync(meshPath);
+  const etag = `"${stats.mtime.getTime()}-${stats.size}"`;
+  
+  // Check if client has cached version
+  const ifNoneMatch = req.headers['if-none-match'];
+  if (ifNoneMatch === etag) {
+    return res.status(304).end(); // Not modified
+  }
+
+  // Set headers for caching
+  res.setHeader('Content-Type', 'application/octet-stream');
+  res.setHeader('ETag', etag);
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Last-Modified', stats.mtime.toUTCString());
+
+  // Stream the file
+  const fileStream = fs.createReadStream(meshPath);
+  fileStream.pipe(res);
+  
+  fileStream.on('error', (err) => {
+    console.error(`[HTTP] Error streaming mesh for token ${token}:`, err);
+    if (!res.headersSent) {
+      res.status(500).json({ error: 'Failed to stream mesh' });
     }
   });
 });

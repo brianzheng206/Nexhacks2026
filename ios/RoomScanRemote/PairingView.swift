@@ -1,3 +1,4 @@
+@ -1,146 +0,0 @@
 //
 //  PairingView.swift
 //  RoomScanRemote

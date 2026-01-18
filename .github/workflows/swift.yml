@@ -1,0 +1,91 @@
+# iOS Swift Build Check - Uses xcodebuild for iOS projects
+# For iOS projects, we need Xcode, not Swift Package Manager
+
+name: iOS Swift Build Check
+
+on:
+  push:
+    branches: [ "main", "phone-test-2" ]
+    paths:
+      - 'ios/**/*.swift'
+      - 'ios/**/*.xcodeproj/**'
+  pull_request:
+    branches: [ "main", "phone-test-2" ]
+    paths:
+      - 'ios/**/*.swift'
+      - 'ios/**/*.xcodeproj/**'
+  workflow_dispatch:  # Allows manual triggering from GitHub UI
+
+jobs:
+  build:
+    runs-on: macos-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Select Xcode version
+      run: |
+        if [ -d "/Applications/Xcode_15.0.app" ]; then
+          sudo xcode-select -s /Applications/Xcode_15.0.app/Contents/Developer
+        elif [ -d "/Applications/Xcode_15.1.app" ]; then
+          sudo xcode-select -s /Applications/Xcode_15.1.app/Contents/Developer
+        else
+          sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
+        fi
+      
+    - name: Show Xcode version
+      run: xcodebuild -version
+      
+    - name: List iOS directory
+      working-directory: ios
+      run: ls -la
+      
+    - name: Find Xcode project
+      working-directory: ios
+      id: find-project
+      run: |
+        echo "Looking for Xcode projects..."
+        if [ -d "RoomScanRemote.xcodeproj" ]; then
+          echo "✅ Found RoomScanRemote.xcodeproj"
+          echo "project=RoomScanRemote.xcodeproj" >> $GITHUB_OUTPUT
+          echo "scheme=RoomScanRemote" >> $GITHUB_OUTPUT
+          echo "found=true" >> $GITHUB_OUTPUT
+        elif [ -d "RoomSensor.xcodeproj" ]; then
+          echo "✅ Found RoomSensor.xcodeproj"
+          echo "project=RoomSensor.xcodeproj" >> $GITHUB_OUTPUT
+          echo "scheme=RoomSensor" >> $GITHUB_OUTPUT
+          echo "found=true" >> $GITHUB_OUTPUT
+        else
+          echo "⚠️  No Xcode project found - will skip build (iOS projects require Xcode project file)"
+          echo "found=false" >> $GITHUB_OUTPUT
+        fi
+        
+    - name: Build iOS project (if Xcode project exists)
+      if: steps.find-project.outputs.found == 'true'
+      working-directory: ios
+      run: |
+        echo "Building with xcodebuild..."
+        xcodebuild -project ${{ steps.find-project.outputs.project }} \
+          -scheme ${{ steps.find-project.outputs.scheme }} \
+          -sdk iphonesimulator \
+          -destination 'platform=iOS Simulator,name=iPhone 15,OS=latest' \
+          clean build \
+          CODE_SIGN_IDENTITY="" \
+          CODE_SIGNING_REQUIRED=NO \
+          CODE_SIGNING_ALLOWED=NO
+      continue-on-error: false
+      
+    - name: Skip build (no Xcode project)
+      if: steps.find-project.outputs.found == 'false'
+      run: |
+        echo "⚠️  No Xcode project found"
+        echo "✅ Skipping build - iOS projects require an Xcode project file (.xcodeproj)"
+        echo "💡 To test full compilation, create an Xcode project and commit it"
+        exit 0
+      
+    - name: Check for build errors
+      if: failure()
+      run: |
+        echo "❌ Build failed! Check the logs above for errors."
+        exit 1
