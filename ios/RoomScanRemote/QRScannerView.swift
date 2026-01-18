@@ -1,4 +1,3 @@
-@ -1,232 +0,0 @@
 //
 //  QRScannerView.swift
 //  RoomScanRemote
@@ -185,16 +184,15 @@ class QRScannerViewController: UIViewController {
         }
         
         // Try to parse http://.../download/<token>/room.usdz
-        if let url = URL(string: string),
-           url.scheme == "http" || url.scheme == "https",
-           let pathComponents = url.pathComponents,
-           pathComponents.count >= 3 {
-            // Extract token from path like /download/<token>/room.usdz
-            let tokenIndex = pathComponents.firstIndex(of: "download")
-            if let index = tokenIndex, index + 1 < pathComponents.count {
-                let token = pathComponents[index + 1]
-                let host = url.host
-                return (token, host)
+        if let url = URL(string: string) {
+            let pathComponents = url.pathComponents
+            if pathComponents.count >= 3 {
+                // Extract token from path like /download/<token>/room...
+                if let tokenIndex = pathComponents.firstIndex(of: "download"), tokenIndex + 1 < pathComponents.count {
+                    let token = pathComponents[tokenIndex + 1]
+                    let host = url.host
+                    return (token, host)
+                }
             }
         }
         

@@ -1,4 +1,3 @@
-@ -1,208 +0,0 @@
 //
 //  ScanView.swift
 //  RoomScanRemote
@@ -7,6 +6,7 @@
 //
 
 import SwiftUI
+import RoomPlan
 
 struct ScanView: View {
     let laptopIP: String

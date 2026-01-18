@@ -1,5 +1,3 @@
-@ -1,387 +0,0 @@
-//
 //  ScanController.swift
 //  RoomScanRemote
 //
@@ -19,7 +17,9 @@ class ScanController: NSObject, ObservableObject {
     
     private var roomCaptureSession: RoomCaptureSession?
     private var lastUpdateTime: TimeInterval = 0
+    private var lastFrameTime: TimeInterval = 0
     private let updateInterval: TimeInterval = 0.2 // 5Hz = 200ms for room updates
+    private let frameInterval: TimeInterval = 0.1 // 10 fps = 100ms for preview frames
     
     var token: String?
     
@@ -48,7 +48,7 @@ class ScanController: NSObject, ObservableObject {
         roomCaptureSession.arSession.delegate = self
         
         // Configure with coaching enabled
-        let configuration = RoomCaptureSession.Configuration()
+        var configuration = RoomCaptureSession.Configuration()
         configuration.isCoachingEnabled = true
         
         // Run the session
@@ -183,11 +183,11 @@ class ScanController: NSObject, ObservableObject {
     }
     
     // Export USDZ file
-    private func exportUSDZ(from capturedRoomData: CapturedRoomData) {
+    private func exportUSDZ(from capturedRoomData: CapturedRoomData) async {
         let builder = RoomBuilder(options: .beautifyObjects)
         
         do {
-            let capturedRoom = try builder.captureRoom(from: capturedRoomData)
+            let capturedRoom = try await builder.capturedRoom(from: capturedRoomData)
             
             // Create temporary file path
             let tempDir = FileManager.default.temporaryDirectory
@@ -195,7 +195,7 @@ class ScanController: NSObject, ObservableObject {
             let fileURL = tempDir.appendingPathComponent(fileName)
             
             // Export to USDZ
-            try capturedRoom.export(to: fileURL, exportOptions: .mesh)
+            try capturedRoom.export(to: fileURL, exportOptions: .model)
             
             print("[ScanController] USDZ exported to: \(fileURL.path)")
             
@@ -292,7 +292,7 @@ class ScanController: NSObject, ObservableObject {
 
 extension ScanController: RoomCaptureSessionDelegate {
     func captureSession(_ session: RoomCaptureSession, didProvide instruction: RoomCaptureSession.Instruction) {
-        let instructionText = instruction.localizedDescription
+        let instructionText = String(describing: instruction)
         print("[ScanController] Instruction: \(instructionText)")
         
         DispatchQueue.main.async {
@@ -317,7 +317,9 @@ extension ScanController: RoomCaptureSessionDelegate {
             } else {
                 print("[ScanController] Scan completed successfully")
                 // Export USDZ
-                self.exportUSDZ(from: capturedRoomData)
+                Task {
+                    await self.exportUSDZ(from: capturedRoomData)
+                }
             }
             
             // Clean up
@@ -330,7 +332,58 @@ extension ScanController: RoomCaptureSessionDelegate {
 
 extension ScanController: ARSessionDelegate {
     func session(_ session: ARSession, didUpdate frame: ARFrame) {
-        // JPEG streaming removed - mesh reconstruction is displayed instead
-        // No need to process frames for preview streaming
+        // Throttle to ~10 fps
+        let currentTime = Date().timeIntervalSince1970
+        guard currentTime - lastFrameTime >= frameInterval else { return }
+        lastFrameTime = currentTime
+        
+        // Convert CVPixelBuffer to JPEG Data on background queue to avoid blocking
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self = self else { return }
+            
+            guard let jpegData = self.convertPixelBufferToJPEG(frame.capturedImage) else {
+                // Conversion failed, skip this frame (error already logged)
+                return
+            }
+            
+            // Send as binary WebSocket message
+            WSClient.shared.sendJPEGFrame(jpegData)
+        }
+    }
+    
+    private func convertPixelBufferToJPEG(_ pixelBuffer: CVPixelBuffer) -> Data? {
+        do {
+            // Create CIImage from CVPixelBuffer
+            let ciImage = CIImage(cvPixelBuffer: pixelBuffer)
+            
+            // Create CIContext with options for better performance
+            let context = CIContext(options: [
+                .useSoftwareRenderer: false,
+                .workingColorSpace: NSNull()
+            ])
+            
+            // Convert to CGImage
+            guard let cgImage = context.createCGImage(ciImage, from: ciImage.extent) else {
+                print("[ScanController] Failed to create CGImage from CIImage")
+                return nil
+            }
+            
+            // Convert to UIImage
+            // ARFrame images are typically in landscape orientation, adjust as needed
+            let uiImage = UIImage(cgImage: cgImage, scale: 1.0, orientation: .right)
+            
+            // Convert to JPEG Data with compression quality (0.7 = good balance of quality/size)
+            guard let jpegData = uiImage.jpegData(compressionQuality: 0.7) else {
+                print("[ScanController] Failed to convert UIImage to JPEG")
+                return nil
+            }
+            
+            return jpegData
+        } catch {
+            // Safeguard: catch any errors during conversion
+            print("[ScanController] Error converting pixel buffer to JPEG: \(error)")
+            return nil
+        }
     }
 }
+
