@@ -126,25 +126,37 @@ function sendToPhone(token, data) {
 }
 
 // Keepalive ping/pong setup with dead connection detection
-const KEEPALIVE_INTERVAL = 20000; // 20 seconds
-const PONG_TIMEOUT = 10000; // 10 seconds to respond to ping
+const KEEPALIVE_INTERVAL = 30000; // 30 seconds (less aggressive)
+const PONG_TIMEOUT = 45000; // 45 seconds to respond to ping (more lenient)
+const CONNECTION_GRACE_PERIOD = 60000; // 60 seconds grace period for new connections
 
-// Track last pong time for each connection
-const connectionLastPong = new WeakMap();
+// Track connection metadata
+const connectionMetadata = new WeakMap();
 
 setInterval(() => {
   sessions.forEach((session, token) => {
+    const now = Date.now();
+    
     // Ping phone connection
     if (session.phoneWs) {
       if (session.phoneWs.readyState === WebSocket.OPEN) {
-        const lastPong = connectionLastPong.get(session.phoneWs);
-        if (lastPong && Date.now() - lastPong > PONG_TIMEOUT) {
-          console.warn(`[Session] Phone connection dead (no pong response) for token: ${token}`);
-          session.phoneWs.terminate();
-          session.phoneWs = null;
-          sendToUI(token, { type: 'status', value: 'phone_disconnected', timestamp: new Date().toISOString() });
-          cleanupSession(token);
+        const metadata = connectionMetadata.get(session.phoneWs);
+        const connectionAge = now - (metadata?.connectedAt || now);
+        
+        // Only check for dead connections after grace period
+        if (connectionAge > CONNECTION_GRACE_PERIOD) {
+          const lastPong = metadata?.lastPong;
+          if (lastPong && now - lastPong > PONG_TIMEOUT) {
+            console.warn(`[Session] Phone connection dead (no pong response) for token: ${token}`);
+            session.phoneWs.terminate();
+            session.phoneWs = null;
+            sendToUI(token, { type: 'status', value: 'phone_disconnected', timestamp: new Date().toISOString() });
+            cleanupSession(token);
+          } else {
+            session.phoneWs.ping();
+          }
         } else {
+          // New connection - just ping, don't check for dead yet
           session.phoneWs.ping();
         }
       } else if (session.phoneWs.readyState === WebSocket.CLOSED || session.phoneWs.readyState === WebSocket.CLOSING) {
@@ -158,11 +170,20 @@ setInterval(() => {
     const deadUIClients = [];
     session.uiWsSet.forEach((uiWs) => {
       if (uiWs.readyState === WebSocket.OPEN) {
-        const lastPong = connectionLastPong.get(uiWs);
-        if (lastPong && Date.now() - lastPong > PONG_TIMEOUT) {
-          console.warn(`[Session] UI connection dead (no pong response) for token: ${token}`);
-          deadUIClients.push(uiWs);
+        const metadata = connectionMetadata.get(uiWs);
+        const connectionAge = now - (metadata?.connectedAt || now);
+        
+        // Only check for dead connections after grace period
+        if (connectionAge > CONNECTION_GRACE_PERIOD) {
+          const lastPong = metadata?.lastPong;
+          if (lastPong && now - lastPong > PONG_TIMEOUT) {
+            console.warn(`[Session] UI connection dead (no pong response) for token: ${token}`);
+            deadUIClients.push(uiWs);
+          } else {
+            uiWs.ping();
+          }
         } else {
+          // New connection - just ping, don't check for dead yet
           uiWs.ping();
         }
       } else if (uiWs.readyState === WebSocket.CLOSED || uiWs.readyState === WebSocket.CLOSING) {
@@ -173,6 +194,7 @@ setInterval(() => {
     // Remove dead UI clients
     deadUIClients.forEach((ws) => {
       session.uiWsSet.delete(ws);
+      connectionMetadata.delete(ws);
     });
     
     if (deadUIClients.length > 0) {
@@ -194,7 +216,9 @@ wss.on('connection', (ws, req) => {
   // Handle pong responses
   ws.on('pong', () => {
     // Client responded to ping, connection is alive
-    connectionLastPong.set(ws, Date.now());
+    const metadata = connectionMetadata.get(ws) || { connectedAt: Date.now() };
+    metadata.lastPong = Date.now();
+    connectionMetadata.set(ws, metadata);
   });
 
   // Handle incoming messages
@@ -243,13 +267,15 @@ wss.on('connection', (ws, req) => {
               session.phoneWs.close(1000, 'New phone connection');
             }
             session.phoneWs = ws;
-            connectionLastPong.set(ws, Date.now()); // Initialize pong tracking
+            // Initialize connection metadata
+            connectionMetadata.set(ws, { connectedAt: Date.now(), lastPong: Date.now() });
             console.log(`[Session] Phone connected: ${token}`);
             // Notify UI clients that phone connected
             sendToUI(token, { type: 'status', value: 'phone_connected', timestamp: new Date().toISOString() });
           } else if (role === 'ui') {
             session.uiWsSet.add(ws);
-            connectionLastPong.set(ws, Date.now()); // Initialize pong tracking
+            // Initialize connection metadata
+            connectionMetadata.set(ws, { connectedAt: Date.now(), lastPong: Date.now() });
             console.log(`[Session] UI client connected: ${token} (${session.uiWsSet.size} UI client(s))`);
           }
 
@@ -287,8 +313,8 @@ wss.on('connection', (ws, req) => {
   // Handle connection close
   ws.on('close', (code, reason) => {
     const reasonStr = reason ? reason.toString() : 'no reason';
-    // Clean up pong tracking
-    connectionLastPong.delete(ws);
+    // Clean up connection metadata
+    connectionMetadata.delete(ws);
     
     if (token && role && session) {
       if (role === 'phone') {
@@ -309,8 +335,8 @@ wss.on('connection', (ws, req) => {
   // Handle errors
   ws.on('error', (error) => {
     console.error(`[WebSocket] Error from ${clientIP} (role: ${role || 'unknown'}, token: ${token || 'none'}):`, error.message || error);
-    // Clean up pong tracking on error
-    connectionLastPong.delete(ws);
+    // Clean up connection metadata on error
+    connectionMetadata.delete(ws);
     
     // If connection is in error state, clean up session
     if (token && role && session) {
