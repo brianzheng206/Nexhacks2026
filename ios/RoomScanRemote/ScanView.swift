@@ -12,18 +12,21 @@ import RoomPlan
 // Uses RoomCaptureView to show live RoomPlan reconstruction.
 
 struct RoomCaptureViewRepresentable: UIViewRepresentable {
-    let captureSession: RoomCaptureSession?
+    let scanController: ScanController
     
     func makeUIView(context: Context) -> RoomCaptureView {
         let roomCaptureView = RoomCaptureView(frame: .zero)
-        roomCaptureView.captureSession = captureSession
+        // RoomCaptureView has its own read-only captureSession
+        // We configure the view's session to use our delegate
+        roomCaptureView.captureSession.delegate = scanController
+        // Store reference to the view's session in the controller
+        scanController.setRoomCaptureSession(roomCaptureView.captureSession)
         return roomCaptureView
     }
     
     func updateUIView(_ uiView: RoomCaptureView, context: Context) {
-        if uiView.captureSession !== captureSession {
-            uiView.captureSession = captureSession
-        }
+        // Ensure delegate is set
+        uiView.captureSession.delegate = scanController
     }
 }
 
@@ -81,9 +84,9 @@ struct ScanView: View {
                 
                 // 3D Room Capture View - takes up most of the screen
                 ZStack {
-                    if scanController.isScanning, let session = scanController.roomCaptureSession {
+                    if scanController.isScanning {
                         // Show the RoomPlan live reconstruction view.
-                        RoomCaptureViewRepresentable(captureSession: session)
+                        RoomCaptureViewRepresentable(scanController: scanController)
                             .ignoresSafeArea(edges: .horizontal)
                     } else {
                         // Placeholder when not scanning

@@ -13,7 +13,7 @@ struct QRScannerView: UIViewControllerRepresentable {
     @Binding var scannedToken: String?
     @Binding var scannedHost: String?
     @Binding var scannedPort: Int?
-    @Environment(\.presentationMode) var presentationMode
+    @Environment(\.dismiss) var dismiss
     
     func makeUIViewController(context: Context) -> QRScannerViewController {
         let controller = QRScannerViewController()
@@ -40,7 +40,7 @@ struct QRScannerView: UIViewControllerRepresentable {
             parent.scannedToken = token
             parent.scannedHost = host
             parent.scannedPort = port
-            parent.presentationMode.wrappedValue.dismiss()
+            parent.dismiss()
         }
     }
 }

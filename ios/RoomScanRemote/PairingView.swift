@@ -24,7 +24,7 @@ struct PairingView: View {
     @State private var scannedPort: Int?
     
     var body: some View {
-        NavigationView {
+        NavigationStack {
             VStack(spacing: 20) {
                 Text("RoomScan Remote")
                     .font(.largeTitle)
@@ -95,14 +95,9 @@ struct PairingView: View {
             }
             .padding()
             .navigationBarHidden(true)
-            .background(
-                NavigationLink(
-                    destination: ScanView(serverHost: serverHost, serverPort: serverPort, token: token),
-                    isActive: $navigateToScan
-                ) {
-                    EmptyView()
-                }
-            )
+            .navigationDestination(isPresented: $navigateToScan) {
+                ScanView(serverHost: serverHost, serverPort: serverPort, token: token)
+            }
             .sheet(isPresented: $showQRScanner) {
                 QRScannerView(scannedToken: $scannedToken, scannedHost: $scannedHost, scannedPort: $scannedPort)
             }

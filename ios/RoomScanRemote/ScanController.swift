@@ -15,8 +15,15 @@ class ScanController: NSObject, ObservableObject {
     @Published var isScanning: Bool = false
     @Published var errorMessage: String?
     
-    // Expose the RoomCaptureSession so it can be used with RoomCaptureView
+    // Reference to the RoomCaptureSession (from RoomCaptureView or created directly)
     @Published private(set) var roomCaptureSession: RoomCaptureSession?
+    
+    // Method to set the session (called from RoomCaptureView)
+    func setRoomCaptureSession(_ session: RoomCaptureSession) {
+        self.roomCaptureSession = session
+        session.delegate = self
+        session.arSession.delegate = self
+    }
     private var lastUpdateTime: TimeInterval = 0
     private var lastFrameTime: TimeInterval = 0
     private let updateInterval: TimeInterval = 0.2 // 5Hz = 200ms for room updates
@@ -56,20 +63,24 @@ class ScanController: NSObject, ObservableObject {
             return
         }
         
-        // Initialize RoomCaptureSession
-        let roomCaptureSession = RoomCaptureSession()
-        roomCaptureSession.delegate = self
-        self.roomCaptureSession = roomCaptureSession
+        // Get or create RoomCaptureSession
+        // If RoomCaptureView is being used, it will set the session via setRoomCaptureSession
+        // Otherwise, create our own session
+        let session: RoomCaptureSession
+        if let existingSession = roomCaptureSession {
+            session = existingSession
+        } else {
+            session = RoomCaptureSession()
+            session.delegate = self
+            session.arSession.delegate = self
+            self.roomCaptureSession = session
+        }
         
-        // Set ARSession delegate for frame capture
-        roomCaptureSession.arSession.delegate = self
-        
-        // Configure RoomPlan with coaching enabled
-        var configuration = RoomCaptureSession.Configuration()
-        configuration.isCoachingEnabled = true
+        // Configure RoomPlan
+        let configuration = RoomCaptureSession.Configuration()
         
         // Run the RoomPlan session
-        roomCaptureSession.run(configuration: configuration)
+        session.run(configuration: configuration)
         
         DispatchQueue.main.async {
             self.isScanning = true
@@ -496,22 +507,52 @@ extension ScanController: ARSessionDelegate {
         }
         
         // Get colors based on classification (semantic coloring)
-        // classificationOf(faceWithIndex:) is a verified API
+        // Note: ARKit provides per-face classification, not per-vertex
+        // We'll map face classifications to vertices by finding which faces use each vertex
         var colorArray: [[Float]] = []
         
-        // For each vertex, sample faces to estimate classification
-        let maxFacesToSample = min(faceArray.count, 200)
-        for vertexIndex in 0..<vertexCount {
-            var classification: ARMeshClassification = .none
-            
-            for faceIndex in 0..<maxFacesToSample {
-                let face = faceArray[faceIndex]
-                if face.contains(vertexIndex) {
-                    classification = geometry.classificationOf(faceWithIndex: faceIndex)
-                    break
+        // Get classification source (per-face data)
+        guard let classificationSource = geometry.classification else {
+            // No classification data available, use default gray for all vertices
+            for _ in 0..<vertexCount {
+                colorArray.append([0.5, 0.5, 0.5, 1.0])
+            }
+            return
+        }
+        
+        // Extract per-face classifications
+        let classificationBuffer = classificationSource.buffer.contents()
+        let classificationOffset = classificationSource.offset
+        let classificationStride = classificationSource.stride
+        let faceCount = classificationSource.count
+        
+        // Read classifications for each face
+        var faceClassifications: [ARMeshClassification] = []
+        for faceIndex in 0..<faceCount {
+            let pointer = classificationBuffer.advanced(by: classificationOffset + faceIndex * classificationStride)
+            // Classification is stored as UInt8 (MTLVertexFormat.uchar)
+            let classificationValue = pointer.load(as: UInt8.self)
+            let classification = ARMeshClassification(rawValue: Int(classificationValue)) ?? .none
+            faceClassifications.append(classification)
+        }
+        
+        // Map face classifications to vertices
+        // For each vertex, find faces that use it and use the first face's classification
+        var vertexClassifications: [ARMeshClassification] = Array(repeating: .none, count: vertexCount)
+        for (faceIndex, face) in faceArray.enumerated() {
+            if faceIndex < faceClassifications.count {
+                let classification = faceClassifications[faceIndex]
+                // Assign this classification to all vertices in this face
+                for vertexIndex in face {
+                    if vertexIndex < vertexCount && vertexClassifications[vertexIndex] == .none {
+                        vertexClassifications[vertexIndex] = classification
+                    }
                 }
             }
-            
+        }
+        
+        // Assign colors based on vertex classifications
+        for classification in vertexClassifications {
             let color = getColorForClassification(classification)
             colorArray.append([color.r, color.g, color.b, 1.0])
         }
