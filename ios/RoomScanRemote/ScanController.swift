@@ -1,3 +1,4 @@
+@ -1,387 +0,0 @@
 //
 //  ScanController.swift
 //  RoomScanRemote
@@ -49,9 +50,8 @@ class ScanController: NSObject, ObservableObject {
         roomCaptureSession.arSession.delegate = self
         
         // Configure with coaching enabled
-        // RoomCaptureSession.Configuration is a struct - create with default settings
-        // Coaching is typically enabled by default in RoomPlan
         let configuration = RoomCaptureSession.Configuration()
+        configuration.isCoachingEnabled = true
         
         // Run the session
         roomCaptureSession.run(configuration: configuration)
@@ -116,7 +116,6 @@ class ScanController: NSObject, ObservableObject {
             ]
             
             // Flatten 4x4 transform matrix (16 floats, column-major)
-            // Using simd_float4x4 which has columns property
             let transform = wall.transform
             var transformArray: [Float] = []
             // Column 0
@@ -141,12 +140,11 @@ class ScanController: NSObject, ObservableObject {
             transformArray.append(transform.columns.3.w)
             wallData["transform"] = transformArray
             
-            // Dimensions - CapturedSurface has dimensions as simd_float3
-            let dimensions = wall.dimensions
+            // Dimensions
             wallData["dimensions"] = [
-                "width": Float(dimensions.x),
-                "height": Float(dimensions.y),
-                "length": Float(dimensions.z)
+                "width": wall.dimensions.x,
+                "height": wall.dimensions.y,
+                "length": wall.dimensions.z
             ]
             
             // polygonCorners if available (check if wall has edge information)
@@ -191,10 +189,7 @@ class ScanController: NSObject, ObservableObject {
         let builder = RoomBuilder(options: .beautifyObjects)
         
         do {
-            // RoomBuilder creates a CapturedRoom from CapturedRoomData
-            // The method might be build(), captureRoom(), or createRoom()
-            // Try build() first - if that fails, check Apple docs for correct method name
-            let capturedRoom = try builder.build(from: capturedRoomData)
+            let capturedRoom = try builder.captureRoom(from: capturedRoomData)
             
             // Create temporary file path
             let tempDir = FileManager.default.temporaryDirectory
@@ -202,7 +197,6 @@ class ScanController: NSObject, ObservableObject {
             let fileURL = tempDir.appendingPathComponent(fileName)
             
             // Export to USDZ
-            // ExportOptions might be .mesh, CapturedRoom.ExportOptions.mesh, or different
             try capturedRoom.export(to: fileURL, exportOptions: .mesh)
             
             print("[ScanController] USDZ exported to: \(fileURL.path)")
@@ -300,8 +294,7 @@ class ScanController: NSObject, ObservableObject {
 
 extension ScanController: RoomCaptureSessionDelegate {
     func captureSession(_ session: RoomCaptureSession, didProvide instruction: RoomCaptureSession.Instruction) {
-        // Instruction has a description property (not localizedDescription)
-        let instructionText = String(describing: instruction)
+        let instructionText = instruction.localizedDescription
         print("[ScanController] Instruction: \(instructionText)")
         
         DispatchQueue.main.async {

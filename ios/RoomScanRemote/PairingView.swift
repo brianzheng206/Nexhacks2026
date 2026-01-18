@@ -1,3 +1,4 @@
+@ -1,146 +0,0 @@
 //
 //  PairingView.swift
 //  RoomScanRemote
@@ -89,13 +90,18 @@ struct PairingView: View {
             }
             .padding()
             .navigationBarHidden(true)
-            .navigationDestination(isPresented: $navigateToScan) {
-                ScanView(laptopIP: laptopIP, token: token)
-            }
+            .background(
+                NavigationLink(
+                    destination: ScanView(laptopIP: laptopIP, token: token),
+                    isActive: $navigateToScan
+                ) {
+                    EmptyView()
+                }
+            )
             .sheet(isPresented: $showQRScanner) {
                 QRScannerView(scannedToken: $scannedToken, scannedHost: $scannedHost)
             }
-            .onChange(of: scannedToken) { oldValue, newToken in
+            .onChange(of: scannedToken) { newToken in
                 if let token = newToken {
                     self.token = token
                     // If host was also scanned, use it; otherwise prompt for IP
