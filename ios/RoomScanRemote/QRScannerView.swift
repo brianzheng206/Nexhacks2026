@@ -171,16 +171,19 @@ class QRScannerViewController: UIViewController {
     
     private func parseQRCode(_ string: String) -> (token: String?, host: String?) {
         // Try to parse roomscan://pair?token=...&host=...&port=...
-        if let url = URL(string: string),
-           url.scheme == "roomscan",
-           url.host == "pair" {
-            let components = URLComponents(url: url, resolvingAgainstBaseURL: false)
-            let queryItems = components?.queryItems
-            
-            let token = queryItems?.first(where: { $0.name == "token" })?.value
-            let host = queryItems?.first(where: { $0.name == "host" })?.value
-            
-            return (token, host)
+        // Note: url.host may be nil for URLs without a path separator, so we check
+        // if the string starts with the expected scheme prefix instead
+        if string.hasPrefix("roomscan://") {
+            // Use URLComponents which handles query parsing more reliably
+            if let components = URLComponents(string: string) {
+                let queryItems = components.queryItems
+                let token = queryItems?.first(where: { $0.name == "token" })?.value
+                let host = queryItems?.first(where: { $0.name == "host" })?.value
+
+                if token != nil || host != nil {
+                    return (token, host)
+                }
+            }
         }
         
         // Try to parse http://.../download/<token>/room.usdz
