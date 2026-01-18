@@ -9,24 +9,29 @@ import SwiftUI
 import RoomPlan
 
 // MARK: - RoomCaptureView Wrapper for SwiftUI
-// Uses RoomCaptureView to show live RoomPlan reconstruction.
+// Uses RoomCaptureView to display the AR session owned by ScanController.
+// Note: RoomCaptureView has its own internal session for display purposes.
+// ScanController owns and controls the RoomCaptureSession used for actual scanning.
 
 struct RoomCaptureViewRepresentable: UIViewRepresentable {
     let scanController: ScanController
     
     func makeUIView(context: Context) -> RoomCaptureView {
+        // Create the view - RoomCaptureView will create its own internal session for display
+        // ScanController owns the actual RoomCaptureSession used for scanning
+        // The view's session is separate and used only for visualization
         let roomCaptureView = RoomCaptureView(frame: .zero)
-        // RoomCaptureView has its own read-only captureSession
-        // We configure the view's session to use our delegate
-        roomCaptureView.captureSession.delegate = scanController
-        // Store reference to the view's session in the controller
-        scanController.setRoomCaptureSession(roomCaptureView.captureSession)
         return roomCaptureView
     }
     
     func updateUIView(_ uiView: RoomCaptureView, context: Context) {
-        // Ensure delegate is set
-        uiView.captureSession.delegate = scanController
+        // RoomCaptureView manages its own internal session for display
+        // ScanController's session (roomCaptureSession) is the single source of truth for scanning logic
+        // We don't need to sync them - the view's session is just for visualization
+        // ScanController's session handles all the actual scanning, delegate callbacks, and data
+        
+        // No action needed here - ScanController manages its session independently
+        // The view will display its own session's AR feed, which is fine for visualization
     }
 }
 
@@ -62,6 +67,7 @@ struct ScanView: View {
     
     @Environment(\.dismiss) private var dismiss
     @StateObject private var scanController = ScanController()
+    @State private var connectionManager = ConnectionManager()
     
     init(serverHost: String, serverPort: Int, token: String) {
         self.serverHost = serverHost
@@ -73,6 +79,10 @@ struct ScanView: View {
     @State private var showReconnectAlert: Bool = false
     @State private var reconnectError: String?
     @State private var wasConnected: Bool = false
+    @State private var isReconnecting: Bool = false
+    @State private var showExitConfirmation: Bool = false
+    @State private var hasAppeared: Bool = false
+    @State private var hasCleanedUp: Bool = false
     
     var body: some View {
         GeometryReader { geometry in
@@ -108,8 +118,6 @@ struct ScanView: View {
                     .background(Color(UIColor.systemBackground))
             }
         }
-        .navigationBarTitleDisplayMode(.inline)
-        .navigationBarHidden(true)
         .alert("Connection Lost", isPresented: $showReconnectAlert) {
             Button("Reconnect") {
                 reconnect()
@@ -119,19 +127,49 @@ struct ScanView: View {
             Text(reconnectError ?? "WebSocket connection failed. Would you like to reconnect?")
         }
         .onAppear {
-            // Set token in scan controller
+            // Prevent multiple setup calls
+            guard !hasAppeared else { return }
+            hasAppeared = true
+            
+            // Set token and connection manager in scan controller
             scanController.token = token
+            scanController.connectionManager = connectionManager
             
             setupWebSocketHandlers()
             updateStatus()
             
             // Verify connection is still active
-            if !WSClient.shared.isConnected {
-                statusMessage = "Disconnected - please reconnect"
+            updateConnectionState()
+        }
+        .onDisappear {
+            // Clean up resources when view disappears (handles all exit paths)
+            // This ensures cleanup happens even if user swipes down or uses system gestures
+            cleanup()
+        }
+        .confirmationDialog("Leave Scan Session?", isPresented: $showExitConfirmation) {
+            Button("Leave", role: .destructive) {
+                cleanupAndDismiss()
             }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            if scanController.isScanning {
+                Text("A scan is in progress. Leaving will stop the scan and disconnect from the server.")
+            } else {
+                Text("Are you sure you want to leave? This will disconnect from the server.")
+            }
+        }
+        .onChange(of: connectionManager.connectionState) { _, newState in
+            updateConnectionState()
+            handleConnectionStateChange(newState)
+        }
+        .onChange(of: connectionManager.connectionQuality) { _, quality in
+            updateStatus() // Update status to show quality indicator
         }
         .onChange(of: scanController.isScanning) { _ in
             updateStatus()
+        }
+        .onChange(of: scanController.actualFPS) { _, _ in
+            // Trigger view update when FPS changes
         }
     }
     
@@ -141,8 +179,8 @@ struct ScanView: View {
         HStack {
             Button(action: handleBack) {
                 HStack(spacing: 6) {
-                    Image(systemName: "chevron.left")
-                    Text("Back")
+                    Image(systemName: "xmark")
+                    Text("Close")
                 }
                 .font(.subheadline)
                 .padding(.vertical, 6)
@@ -157,7 +195,7 @@ struct ScanView: View {
             
             Spacer()
             
-            // Status indicator
+            // Status indicator with connection state and quality
             HStack(spacing: 6) {
                 Circle()
                     .fill(statusColor)
@@ -165,6 +203,18 @@ struct ScanView: View {
                 Text(statusMessage)
                     .font(.caption)
                     .foregroundColor(.secondary)
+                
+                // Connection quality indicator (only show when connected)
+                if connectionManager.isConnected {
+                    HStack(spacing: 4) {
+                        Circle()
+                            .fill(connectionManager.connectionQuality == .good ? Color.green : Color.orange)
+                            .frame(width: 6, height: 6)
+                        Text(connectionManager.connectionQuality.displayName)
+                            .font(.caption2)
+                            .foregroundColor(.secondary)
+                    }
+                }
             }
             .padding(.horizontal, 10)
             .padding(.vertical, 5)
@@ -212,11 +262,11 @@ struct ScanView: View {
                     .fontWeight(.semibold)
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 14)
-                    .background(scanController.isScanning || !WSClient.shared.isConnected || !RoomCaptureSession.isSupported ? Color.gray : Color.green)
+                    .background(scanController.isScanning || !connectionManager.isConnected || !RoomCaptureSession.isSupported ? Color.gray : Color.green)
                     .foregroundColor(.white)
                     .cornerRadius(12)
                 }
-                .disabled(scanController.isScanning || !WSClient.shared.isConnected || !RoomCaptureSession.isSupported)
+                .disabled(scanController.isScanning || !connectionManager.isConnected || !RoomCaptureSession.isSupported)
                 
                 Button(action: stopScan) {
                     HStack {
@@ -247,7 +297,7 @@ struct ScanView: View {
                 
                 Image(systemName: "key")
                     .foregroundColor(.secondary)
-                Text("Token: \(String(token.prefix(8)))...")
+                Text("Token: \(token.maskedForLogging)")
                     .font(.caption)
                     .foregroundColor(.secondary)
             }
@@ -263,72 +313,78 @@ struct ScanView: View {
     // MARK: - Computed Properties
     
     private var statusColor: Color {
-        switch statusMessage.lowercased() {
-        case "connected":
-            return .green
-        case "scanning":
-            return .blue
-        case "disconnected", "disconnected - please reconnect":
-            return .red
-        default:
+        switch connectionManager.connectionState {
+        case .connected:
+            return scanController.isScanning ? .blue : .green
+        case .connecting, .reconnecting:
             return .orange
+        case .disconnected:
+            return .gray
+        case .failed:
+            return .red
         }
     }
     
     // MARK: - Methods
     
     private func setupWebSocketHandlers() {
-        let wsClient = WSClient.shared
-        
-        // Update status when connection state changes
-        wsClient.onConnectionStateChanged = { isConnected in
-            DispatchQueue.main.async {
-                if isConnected {
-                    statusMessage = "Connected"
-                    wasConnected = true
-                } else {
-                    statusMessage = "Disconnected"
-                    // Show reconnect alert if we were previously connected
-                    if wasConnected {
-                        showReconnectAlert = true
-                        reconnectError = "Connection lost. Please reconnect."
-                    }
-                }
-            }
-        }
-        
         // Handle control messages from server
-        wsClient.onControlMessage = { action in
-            DispatchQueue.main.async {
-                if action == "start" {
-                    startScan()
-                } else if action == "stop" {
-                    stopScan()
-                }
+        connectionManager.onControlMessage = { action in
+            if action == "start" {
+                startScan()
+            } else if action == "stop" {
+                stopScan()
             }
         }
     }
     
     private func reconnect() {
-        let wsClient = WSClient.shared
-        wsClient.connect(laptopHost: serverHost, port: serverPort, token: token) { success, error in
-            DispatchQueue.main.async {
-                if success {
-                    statusMessage = "Connected"
-                    showReconnectAlert = false
-                    reconnectError = nil
-                    wasConnected = true
-                } else {
-                    reconnectError = error ?? "Reconnection failed"
-                    showReconnectAlert = true
-                }
+        // Use reconnect method which shows reconnecting state
+        connectionManager.reconnect(laptopHost: serverHost, port: serverPort, token: token) { success, error in
+            if success {
+                statusMessage = "Connected"
+                showReconnectAlert = false
+                reconnectError = nil
+                wasConnected = true
+                isReconnecting = false
+            } else {
+                reconnectError = error ?? "Reconnection failed. Please check your network and server settings."
+                showReconnectAlert = true
+                isReconnecting = false
             }
         }
     }
 
     private func handleBack() {
-        scanController.stopScan()
-        WSClient.shared.disconnect()
+        // Check if scan is active - show confirmation if so
+        if scanController.isScanning {
+            showExitConfirmation = true
+        } else {
+            cleanupAndDismiss()
+        }
+    }
+    
+    // Cleanup resources (called on view disappear and before dismiss)
+    // Ensures cleanup happens in all exit paths: back button, swipe down, system gestures
+    private func cleanup() {
+        // Prevent multiple cleanup calls
+        guard !hasCleanedUp else { return }
+        hasCleanedUp = true
+        
+        // Stop scanning if active
+        if scanController.isScanning {
+            scanController.stopScan()
+        }
+        
+        // Disconnect WebSocket - ensures connection is closed in all exit paths
+        connectionManager.disconnect()
+        
+        // Cleanup logged in ScanController and ConnectionManager
+    }
+    
+    // Cleanup and dismiss (called after confirmation or when safe to leave)
+    private func cleanupAndDismiss() {
+        cleanup()
         dismiss()
     }
     
@@ -337,10 +393,62 @@ struct ScanView: View {
             statusMessage = "Scanning"
         } else if !RoomCaptureSession.isSupported {
             statusMessage = "RoomPlan not supported"
-        } else if WSClient.shared.isConnected {
-            statusMessage = "Connected"
         } else {
-            statusMessage = "Disconnected"
+            // Use connection state display name
+            statusMessage = connectionManager.statusMessage
+        }
+    }
+    
+    private func updateConnectionState() {
+        updateStatus()
+        
+        // Update wasConnected flag
+        if connectionManager.isConnected {
+            wasConnected = true
+        }
+    }
+    
+    // Format bytes for display
+    private func formatBytes(_ bytes: Int64) -> String {
+        if bytes < 1024 {
+            return "\(bytes) B"
+        } else if bytes < 1024 * 1024 {
+            return String(format: "%.1f KB", Double(bytes) / 1024.0)
+        } else {
+            return String(format: "%.1f MB", Double(bytes) / (1024.0 * 1024.0))
+        }
+    }
+    
+    private func handleConnectionStateChange(_ newState: ConnectionState) {
+        switch newState {
+        case .connected:
+            wasConnected = true
+            showReconnectAlert = false
+            reconnectError = nil
+            isReconnecting = false
+            
+        case .disconnected:
+            // Show reconnect alert if we were previously connected
+            if wasConnected {
+                showReconnectAlert = true
+                reconnectError = "Connection lost. Would you like to reconnect?"
+            }
+            isReconnecting = false
+            
+        case .connecting:
+            isReconnecting = false
+            
+        case .reconnecting:
+            isReconnecting = true
+            // Show reconnection attempt in UI
+            statusMessage = "Reconnecting..."
+            
+        case .failed(let error):
+            isReconnecting = false
+            if wasConnected {
+                showReconnectAlert = true
+                reconnectError = error
+            }
         }
     }
     
@@ -351,7 +459,7 @@ struct ScanView: View {
     
     private func stopScan() {
         scanController.stopScan()
-        if WSClient.shared.isConnected {
+        if connectionManager.isConnected {
             statusMessage = "Connected"
         } else {
             statusMessage = "Disconnected"

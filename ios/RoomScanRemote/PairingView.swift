@@ -11,6 +11,7 @@ import Foundation
 struct PairingView: View {
     private let defaultPort = 8080
 
+    @State private var connectionManager = ConnectionManager()
     @State private var serverAddress: String = ""
     @State private var serverHost: String = ""
     @State private var serverPort: Int = 8080
@@ -22,6 +23,12 @@ struct PairingView: View {
     @State private var scannedToken: String?
     @State private var scannedHost: String?
     @State private var scannedPort: Int?
+    
+    // Validation states
+    @State private var isServerAddressValid: Bool = true
+    @State private var isTokenValid: Bool = true
+    @State private var serverAddressValidationMessage: String = ""
+    @State private var tokenValidationMessage: String = ""
     
     var body: some View {
         NavigationStack {
@@ -88,14 +95,15 @@ struct PairingView: View {
                     .foregroundColor(.white)
                     .cornerRadius(10)
                 }
-                .disabled(isConnecting || serverAddress.isEmpty || token.isEmpty)
+                .disabled(isConnecting || serverAddress.isEmpty || token.isEmpty || !isServerAddressValid || !isTokenValid)
                 .padding(.top, 10)
                 
                 Spacer()
             }
             .padding()
-            .navigationBarHidden(true)
-            .navigationDestination(isPresented: $navigateToScan) {
+            .navigationTitle("RoomScan Remote")
+            .navigationBarTitleDisplayMode(.inline)
+            .fullScreenCover(isPresented: $navigateToScan) {
                 ScanView(serverHost: serverHost, serverPort: serverPort, token: token)
             }
             .sheet(isPresented: $showQRScanner) {
@@ -113,9 +121,98 @@ struct PairingView: View {
         }
     }
     
+    // Real-time validation for server address
+    private func validateServerAddress(_ address: String) {
+        let trimmed = address.trimmingCharacters(in: .whitespacesAndNewlines)
+        
+        if trimmed.isEmpty {
+            isServerAddressValid = true // Don't show error for empty field
+            serverAddressValidationMessage = ""
+            return
+        }
+        
+        if let parsed = parseServerAddress(trimmed) {
+            isServerAddressValid = true
+            serverAddressValidationMessage = ""
+        } else {
+            isServerAddressValid = false
+            serverAddressValidationMessage = "Invalid format. Use: hostname or hostname:port (e.g., 192.168.1.100:8080)"
+        }
+    }
+    
+    // Real-time validation for token
+    private func validateToken(_ tokenValue: String) {
+        let trimmed = tokenValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        
+        if trimmed.isEmpty {
+            isTokenValid = true // Don't show error for empty field
+            tokenValidationMessage = ""
+            return
+        }
+        
+        // Token should be non-empty after trimming
+        if trimmed.isEmpty {
+            isTokenValid = false
+            tokenValidationMessage = "Session token cannot be empty or only whitespace"
+            return
+        }
+        
+        // Optional: Add format validation if tokens have a specific format
+        // For now, just check it's not empty
+        isTokenValid = true
+        tokenValidationMessage = ""
+    }
+    
+    // Check server reachability before attempting WebSocket connection
+    private func checkReachability(host: String, port: Int, completion: @escaping (Bool, String?) -> Void) {
+        let urlString = "http://\(host):\(port)/health"
+        guard let url = URL(string: urlString) else {
+            completion(false, "Invalid server URL")
+            return
+        }
+        
+        var request = URLRequest(url: url)
+        request.httpMethod = "GET"
+        request.timeoutInterval = 3.0 // 3 second timeout for reachability check
+        
+        let task = URLSession.shared.dataTask(with: request) { data, response, error in
+            if let error = error {
+                if let urlError = error as? URLError {
+                    switch urlError.code {
+                    case .notConnectedToInternet:
+                        completion(false, "No internet connection")
+                    case .cannotConnectToHost, .timedOut:
+                        completion(false, "Cannot reach server. Check address and ensure server is running.")
+                    case .dnsLookupFailed:
+                        completion(false, "DNS lookup failed. Check server address.")
+                    default:
+                        completion(false, "Server unreachable: \(urlError.localizedDescription)")
+                    }
+                } else {
+                    completion(false, "Reachability check failed: \(error.localizedDescription)")
+                }
+                return
+            }
+            
+            // If we get any response (even 404), server is reachable
+            if let httpResponse = response as? HTTPURLResponse {
+                completion(true, nil)
+            } else {
+                completion(true, nil) // Non-HTTP response still means server is reachable
+            }
+        }
+        
+        task.resume()
+    }
+    
     private func connect() {
         guard !serverAddress.isEmpty, !token.isEmpty else {
             errorMessage = "Please enter both server address and token"
+            return
+        }
+        
+        guard isServerAddressValid, isTokenValid else {
+            errorMessage = "Please fix validation errors before connecting"
             return
         }
         
@@ -130,15 +227,37 @@ struct PairingView: View {
         serverHost = parsed.host
         serverPort = parsed.port
         
-        // Initialize WebSocket client and attempt connection
-        let wsClient = WSClient.shared
-        wsClient.connect(laptopHost: parsed.host, port: parsed.port, token: token) { success, error in
-            DispatchQueue.main.async {
-                isConnecting = false
-                if success {
-                    navigateToScan = true
-                } else {
-                    errorMessage = error ?? "Connection failed"
+        // Normalize token trimming at entry point (before passing to WSClient)
+        let trimmedToken = token.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedToken.isEmpty else {
+            errorMessage = "Session token cannot be empty"
+            isConnecting = false
+            return
+        }
+        
+        // Check server reachability first
+        checkReachability(host: parsed.host, port: parsed.port) { [weak self] reachable, error in
+            guard let self = self else { return }
+            
+            if !reachable {
+                DispatchQueue.main.async {
+                    self.isConnecting = false
+                    self.errorMessage = error ?? "Server unreachable. Please check your network and server address."
+                }
+                return
+            }
+            
+            // Server is reachable, proceed with WebSocket connection
+            self.connectionManager.connect(laptopHost: parsed.host, port: parsed.port, token: trimmedToken) { success, error in
+                DispatchQueue.main.async {
+                    self.isConnecting = false
+                    if success {
+                        self.navigateToScan = true
+                    } else {
+                        // Provide user-friendly error messages
+                        let userMessage = error ?? "Connection failed. Please check your network and server settings."
+                        self.errorMessage = userMessage
+                    }
                 }
             }
         }

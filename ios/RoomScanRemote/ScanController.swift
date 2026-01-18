@@ -3,6 +3,14 @@
 //
 //  Controller for RoomPlan scanning
 //
+//  Requirements:
+//  - iOS 16.0+ (RoomPlan framework requirement)
+//  - Device with LiDAR or TrueDepth camera (RoomPlan hardware requirement)
+//
+//  Note: This app uses RoomPlan's structured room data (walls, doors, windows, objects)
+//  via RoomCaptureSessionDelegate callbacks. Raw ARKit mesh streaming is not used,
+//  as RoomPlan provides better structured data for room reconstruction.
+//
 
 import Foundation
 import Combine
@@ -11,44 +19,176 @@ import RoomPlan
 import CoreImage
 import UIKit
 
+private let logger = AppLogger.scanning
+private let frameLogger = AppLogger.frameProcessing
+
 class ScanController: NSObject, ObservableObject {
+    // @Published properties must only be updated on main thread
+    // Use updateStateOnMain() helper method for all updates
     @Published var isScanning: Bool = false
     @Published var errorMessage: String?
     
-    // Reference to the RoomCaptureSession (from RoomCaptureView or created directly)
+    // ScanController owns the RoomCaptureSession - single source of truth
     @Published private(set) var roomCaptureSession: RoomCaptureSession?
-    
-    // Method to set the session (called from RoomCaptureView)
-    func setRoomCaptureSession(_ session: RoomCaptureSession) {
-        self.roomCaptureSession = session
-        session.delegate = self
-        session.arSession.delegate = self
-    }
     private var lastUpdateTime: TimeInterval = 0
     private var lastFrameTime: TimeInterval = 0
     private let updateInterval: TimeInterval = 0.2 // 5Hz = 200ms for room updates
     private let frameInterval: TimeInterval = 0.1 // 10 fps = 100ms for preview frames
-    private var lastMeshUpdateTime: TimeInterval = 0
-    private let meshUpdateInterval: TimeInterval = 0.5 // 2Hz = 500ms for mesh updates (lower frequency due to size)
-    private let enableMeshStreaming = false
     
-    // Reusable CIContext for JPEG conversion - creating this once prevents flickering
+    // Note: RoomPlan provides structured room data (walls, doors, windows, objects) through
+    // RoomCaptureSessionDelegate callbacks. We don't need raw ARKit mesh streaming.
+    // Minimum iOS version: iOS 16.0 (RoomPlan requirement)
+    
+    // Reusable CIContext for JPEG conversion - created eagerly on background queue
     // CIContext is heavyweight and expensive to create; reusing it is critical for performance
-    private lazy var ciContext: CIContext = {
-        // Use default options - hardware accelerated, no caching for better performance
-        return CIContext()
-    }()
+    // Must be accessed only on frameProcessingQueue to ensure thread safety
+    private var ciContext: CIContext?
     
-    // Serial queue for frame processing to prevent out-of-order frames
+    // Background queue for frame processing - all Core Image operations happen here
     private let frameProcessingQueue = DispatchQueue(label: "com.roomscan.frameProcessing", qos: .userInitiated)
     
-    // Flag to prevent frame queue buildup (backpressure)
-    private var isProcessingFrame = false
+    // Backpressure control - all logic centralized here
+    // Simple atomic flag: check and set happen on main thread (ARSession callback)
+    // Reset happens on background queue, but we use a lock for thread safety
+    private let processingLock = NSLock()
+    private var _isProcessingFrame = false
+    private var isProcessingFrame: Bool {
+        get {
+            processingLock.lock()
+            defer { processingLock.unlock() }
+            return _isProcessingFrame
+        }
+        set {
+            processingLock.lock()
+            defer { processingLock.unlock() }
+            _isProcessingFrame = newValue
+        }
+    }
     
-    var token: String?
+    // Frame statistics for monitoring and adaptive rate control
+    private var totalFramesProcessed: Int = 0
+    private var totalFramesDropped: Int = 0
+    private var framesSinceLastLog: Int = 0
+    private let statisticsLogInterval = 100
+    
+    // Real-time FPS tracking (actual frames being sent)
+    @Published private(set) var actualFPS: Double = 0.0
+    private var frameTimestamps: [Date] = []
+    private let fpsCalculationWindow: TimeInterval = 2.0 // Calculate FPS over last 2 seconds
+    private var lastFPSUpdate: Date = Date()
+    private let fpsUpdateInterval: TimeInterval = 0.5 // Update FPS display every 0.5 seconds
+    
+    private func updateFPS() {
+        let now = Date()
+        let cutoffTime = now.addingTimeInterval(-fpsCalculationWindow)
+        frameTimestamps.removeAll { $0 < cutoffTime }
+        
+        guard !frameTimestamps.isEmpty else {
+            DispatchQueue.main.async {
+                self.actualFPS = 0.0
+            }
+            return
+        }
+        
+        let timeSpan = now.timeIntervalSince(frameTimestamps.first!)
+        guard timeSpan > 0 else {
+            DispatchQueue.main.async {
+                self.actualFPS = 0.0
+            }
+            return
+        }
+        
+        let calculatedFPS = Double(frameTimestamps.count) / timeSpan
+        
+        // Update on main thread if enough time has passed
+        if now.timeIntervalSince(lastFPSUpdate) >= fpsUpdateInterval {
+            DispatchQueue.main.async {
+                self.actualFPS = calculatedFPS
+            }
+            lastFPSUpdate = now
+        }
+    }
+    
+    // Adaptive frame rate - adjust based on network conditions
+    // Initialized to match frameInterval (0.1s = 10 fps), then adapts based on network conditions
+    private var currentFrameInterval: TimeInterval = 0.1
+    private let minFrameInterval: TimeInterval = 0.05 // Max 20 fps
+    private let maxFrameInterval: TimeInterval = 0.2 // Min 5 fps
+    private let adaptiveRateStep: TimeInterval = 0.01 // Adjust by 0.01s increments
+    private var consecutiveDrops: Int = 0
+    private let dropThresholdForSlowdown = 3 // Slow down after 3 consecutive drops
+    
+    // Token stored in memory - marked as sensitive (never logged, always masked)
+    var token: String? {
+        didSet {
+            // Clear old token from memory when setting new one (best effort)
+            if let oldValue = oldValue {
+                var mutable = oldValue
+                mutable.removeAll()
+            }
+        }
+    }
+    var connectionManager: ConnectionManager?
+    
+    // MARK: - Thread-Safe State Updates
+    
+    /// Helper method to update @Published properties on main thread
+    /// All @Published property updates MUST go through this method to ensure thread safety
+    /// This method can be called from any thread and will dispatch to main thread
+    private func updateStateOnMain(
+        isScanning: Bool? = nil,
+        errorMessage: String?? = nil,
+        roomCaptureSession: RoomCaptureSession?? = nil
+    ) {
+        // If already on main thread, update directly (optimization)
+        if Thread.isMainThread {
+            if let isScanning = isScanning {
+                self.isScanning = isScanning
+            }
+            if let errorMessage = errorMessage {
+                self.errorMessage = errorMessage
+            }
+            if let roomCaptureSession = roomCaptureSession {
+                self.roomCaptureSession = roomCaptureSession
+            }
+        } else {
+            // Dispatch to main thread for background thread calls
+            DispatchQueue.main.async { [weak self] in
+                guard let self = self else { return }
+                if let isScanning = isScanning {
+                    self.isScanning = isScanning
+                }
+                if let errorMessage = errorMessage {
+                    self.errorMessage = errorMessage
+                }
+                if let roomCaptureSession = roomCaptureSession {
+                    self.roomCaptureSession = roomCaptureSession
+                }
+            }
+        }
+    }
     
     override init() {
         super.init()
+        // Initialize CIContext eagerly on background queue to avoid main thread blocking
+        prewarmCIContext()
+    }
+    
+    init(connectionManager: ConnectionManager) {
+        super.init()
+        self.connectionManager = connectionManager
+        // Initialize CIContext eagerly on background queue to avoid main thread blocking
+        prewarmCIContext()
+    }
+    
+    // Pre-warm CIContext on background queue before scanning starts
+    private func prewarmCIContext() {
+        frameProcessingQueue.async { [weak self] in
+            guard let self = self else { return }
+            // Create CIContext on background queue - hardware accelerated, no caching for better performance
+            self.ciContext = CIContext()
+            logger.debug("CIContext initialized on background queue")
+        }
     }
     
     func startScan() {
@@ -56,25 +196,32 @@ class ScanController: NSObject, ObservableObject {
         
         // Check if RoomPlan is supported
         guard RoomCaptureSession.isSupported else {
-            DispatchQueue.main.async {
-                self.errorMessage = "RoomPlan is not supported on this device"
-            }
-            print("[ScanController] RoomPlan not supported")
+            updateStateOnMain(errorMessage: "RoomPlan is not supported on this device")
+            logger.error("RoomPlan not supported on this device")
             return
         }
         
-        // Get or create RoomCaptureSession
-        // If RoomCaptureView is being used, it will set the session via setRoomCaptureSession
-        // Otherwise, create our own session
-        let session: RoomCaptureSession
+        // ScanController always creates and owns its own session
+        // If a session already exists, clean it up first to prevent duplicate delegates
         if let existingSession = roomCaptureSession {
-            session = existingSession
-        } else {
-            session = RoomCaptureSession()
-            session.delegate = self
-            session.arSession.delegate = self
-            self.roomCaptureSession = session
+            // Clear delegates before stopping to prevent any callbacks during cleanup
+            existingSession.arSession.delegate = nil
+            existingSession.delegate = nil
+            if existingSession.isActive {
+                existingSession.stop()
+            }
         }
+        
+        // Create new session - ScanController is the single source of truth
+        // Delegate assignment happens only once here, ensuring no duplicates
+        let session = RoomCaptureSession()
+        session.delegate = self
+        session.arSession.delegate = self
+        
+        // Update session on main thread (thread-safe)
+        updateStateOnMain(roomCaptureSession: session)
+        
+        logger.info("Created new RoomCaptureSession - ScanController owns this session")
         
         // Configure RoomPlan
         let configuration = RoomCaptureSession.Configuration()
@@ -82,27 +229,84 @@ class ScanController: NSObject, ObservableObject {
         // Run the RoomPlan session
         session.run(configuration: configuration)
         
-        DispatchQueue.main.async {
-            self.isScanning = true
-            self.errorMessage = nil
+        // Update scanning state on main thread
+        updateStateOnMain(isScanning: true, errorMessage: nil)
+        
+        // Reset frame statistics and adaptive rate for new scan
+        totalFramesProcessed = 0
+        totalFramesDropped = 0
+        framesSinceLastLog = 0
+        consecutiveDrops = 0
+        currentFrameInterval = frameInterval // Reset to initial rate
+        isProcessingFrame = false
+        frameTimestamps.removeAll()
+        
+        // Ensure CIContext is ready before scanning starts
+        frameProcessingQueue.async { [weak self] in
+            guard let self = self else { return }
+            if self.ciContext == nil {
+                self.ciContext = CIContext()
+                logger.debug("CIContext created during scan start")
+            }
         }
+        
         sendStatusMessage(value: "scan_started")
-        print("[ScanController] Scan started")
+        logger.info("Scan started - frame rate: \(1.0/frameInterval) fps")
     }
     
     func stopScan() {
         guard isScanning else { return }
         
-        // Clear ARSession delegate before stopping
-        roomCaptureSession?.arSession.delegate = nil
-        roomCaptureSession?.stop()
-        roomCaptureSession = nil
-        
-        DispatchQueue.main.async {
-            self.isScanning = false
+        // Clean up session - clear delegates first to prevent callbacks during cleanup
+        // Then stop the session, then nil the reference
+        if let session = roomCaptureSession {
+            // Clear delegates first (order matters for cleanup)
+            session.arSession.delegate = nil
+            session.delegate = nil
+            // Stop the session
+            if session.isActive {
+                session.stop()
+            }
+            logger.info("Stopped and cleaned up RoomCaptureSession")
         }
+        
+        // Update state on main thread (thread-safe)
+        updateStateOnMain(isScanning: false, roomCaptureSession: nil)
+        
+        // Log final statistics
+        if totalFramesProcessed > 0 || totalFramesDropped > 0 {
+            let dropRate = Double(totalFramesDropped) / Double(totalFramesProcessed + totalFramesDropped) * 100.0
+            logger.info("Scan stopped - Final Statistics: Processed: \(totalFramesProcessed), Dropped: \(totalFramesDropped), Drop Rate: \(String(format: "%.1f", dropRate))%")
+        }
+        
+        // Reset processing flag
+        isProcessingFrame = false
+        
         sendStatusMessage(value: "scan_stopped")
-        print("[ScanController] Scan stopped")
+        logger.info("Scan stopped")
+    }
+    
+    deinit {
+        // Ensure cleanup on deallocation - prevent memory leaks and delegate callbacks
+        // Note: deinit can be called on any thread, so we need to be careful
+        if let session = roomCaptureSession {
+            // Always clear delegates first
+            session.arSession.delegate = nil
+            session.delegate = nil
+            // Stop if still active
+            if session.isActive {
+                session.stop()
+            }
+            // Update on main thread if we're not already on it
+            if Thread.isMainThread {
+                roomCaptureSession = nil
+            } else {
+                DispatchQueue.main.sync {
+                    roomCaptureSession = nil
+                }
+            }
+            logger.debug("Deallocated - cleaned up RoomCaptureSession")
+        }
     }
     
     // Send instruction message to server
@@ -198,18 +402,25 @@ class ScanController: NSObject, ObservableObject {
     private func sendMessage(_ message: [String: Any]) {
         guard let jsonData = try? JSONSerialization.data(withJSONObject: message),
               let jsonString = String(data: jsonData, encoding: .utf8) else {
-            print("[ScanController] Failed to serialize message")
+            logger.error("Failed to serialize message")
             return
         }
         
-        let wsClient = WSClient.shared
-        guard wsClient.isConnected else {
-            print("[ScanController] Cannot send message: not connected")
-            return
+        // Use ConnectionManager if available, otherwise fall back to WSClient
+        if let connectionManager = connectionManager {
+            guard connectionManager.isConnected else {
+                logger.debug("Cannot send message: not connected")
+                return
+            }
+            connectionManager.sendMessage(jsonString)
+        } else {
+            let wsClient = WSClient.shared
+            guard wsClient.isConnected else {
+                logger.debug("Cannot send message: not connected")
+                return
+            }
+            wsClient.sendMessage(jsonString)
         }
-        
-        // Send via WebSocket (we'll need to add a method to WSClient for this)
-        wsClient.sendMessage(jsonString)
     }
     
     // Export USDZ file
@@ -227,19 +438,29 @@ class ScanController: NSObject, ObservableObject {
             // Export to USDZ
             try capturedRoom.export(to: fileURL, exportOptions: .mesh)
             
-            print("[ScanController] USDZ exported to: \(fileURL.path)")
+            logger.info("USDZ exported to: \(fileURL.path)")
             
             // Upload to server
-            if let host = WSClient.shared.currentHost, let token = token {
-                let port = WSClient.shared.currentPort ?? 8080
+            let host: String?
+            let port: Int
+            if let connectionManager = connectionManager {
+                host = connectionManager.currentHost
+                port = connectionManager.currentPort ?? 8080
+            } else {
+                host = WSClient.shared.currentHost
+                port = WSClient.shared.currentPort ?? 8080
+            }
+            
+            if let host = host, let token = token {
                 uploadUSDZ(fileURL: fileURL, host: host, port: port, token: token)
             } else {
-                print("[ScanController] Cannot upload: missing server host or token")
+                logger.error("Cannot upload: missing server host or token")
             }
             
         } catch {
-            print("[ScanController] Error exporting USDZ: \(error)")
-            errorMessage = "Failed to export USDZ: \(error.localizedDescription)"
+            logger.error("Error exporting USDZ: \(error.localizedDescription)")
+            // Update error message on main thread (async function may be on background thread)
+            updateStateOnMain(errorMessage: "Failed to export USDZ: \(error.localizedDescription)")
         }
     }
     
@@ -261,10 +482,9 @@ class ScanController: NSObject, ObservableObject {
         body.append("Content-Type: application/octet-stream\r\n\r\n".data(using: .utf8)!)
         
         guard let fileData = try? Data(contentsOf: fileURL) else {
-            print("[ScanController] Failed to read file data from: \(fileURL.path)")
-            DispatchQueue.main.async {
-                self.errorMessage = "Failed to read USDZ file"
-            }
+            logger.error("Failed to read file data from: \(fileURL.path)")
+            // Update error message on main thread (URLSession callback may be on background thread)
+            updateStateOnMain(errorMessage: "Failed to read USDZ file")
             return
         }
         
@@ -275,10 +495,9 @@ class ScanController: NSObject, ObservableObject {
         
         let task = URLSession.shared.dataTask(with: request) { [weak self] data, response, error in
             if let error = error {
-                print("[ScanController] Upload error: \(error)")
-                DispatchQueue.main.async {
-                    self?.errorMessage = "Upload failed: \(error.localizedDescription)"
-                }
+                logger.error("Upload error: \(error.localizedDescription)")
+                // Update error message on main thread (URLSession callback is on background thread)
+                self?.updateStateOnMain(errorMessage: "Upload failed: \(error.localizedDescription)")
                 // Clean up temp file even on error
                 try? FileManager.default.removeItem(at: fileURL)
                 return
@@ -286,15 +505,14 @@ class ScanController: NSObject, ObservableObject {
             
             if let httpResponse = response as? HTTPURLResponse {
                 if httpResponse.statusCode == 200 {
-                    print("[ScanController] USDZ uploaded successfully")
+                    logger.info("USDZ uploaded successfully")
                     
                     // Send status message to UI
                     self?.sendStatusMessage(value: "upload_complete")
                 } else {
-                    print("[ScanController] Upload failed with status: \(httpResponse.statusCode)")
-                    DispatchQueue.main.async {
-                        self?.errorMessage = "Upload failed with status: \(httpResponse.statusCode)"
-                    }
+                    logger.error("Upload failed with status: \(httpResponse.statusCode)")
+                    // Update error message on main thread (URLSession callback is on background thread)
+                    self?.updateStateOnMain(errorMessage: "Upload failed with status: \(httpResponse.statusCode)")
                 }
             }
             
@@ -324,7 +542,7 @@ class ScanController: NSObject, ObservableObject {
 extension ScanController: RoomCaptureSessionDelegate {
     func captureSession(_ session: RoomCaptureSession, didProvide instruction: RoomCaptureSession.Instruction) {
         let instructionText = String(describing: instruction)
-        print("[ScanController] Instruction: \(instructionText)")
+        logger.debug("Instruction: \(instructionText)")
         
         DispatchQueue.main.async {
             self.sendInstruction(instructionText)
@@ -339,22 +557,23 @@ extension ScanController: RoomCaptureSessionDelegate {
     }
     
     func captureSession(_ session: RoomCaptureSession, didEndWith capturedRoomData: CapturedRoomData, error: Error?) {
-        DispatchQueue.main.async {
-            self.isScanning = false
-            
-            if let error = error {
-                print("[ScanController] Scan ended with error: \(error)")
-                self.errorMessage = "Scan error: \(error.localizedDescription)"
-            } else {
-                print("[ScanController] Scan completed successfully")
-                // Export USDZ
-                Task {
-                    await self.exportUSDZ(from: capturedRoomData)
-                }
+        // RoomCaptureSessionDelegate callbacks may be on background thread
+        // Use thread-safe state update helper
+        if let error = error {
+                logger.error("Scan ended with error: \(error.localizedDescription)")
+            updateStateOnMain(
+                isScanning: false,
+                errorMessage: "Scan error: \(error.localizedDescription)",
+                roomCaptureSession: nil
+            )
+        } else {
+                logger.info("Scan completed successfully")
+            // Update state first
+            updateStateOnMain(isScanning: false, roomCaptureSession: nil)
+            // Export USDZ
+            Task {
+                await self.exportUSDZ(from: capturedRoomData)
             }
-            
-            // Clean up
-            self.roomCaptureSession = nil
         }
     }
 }
@@ -362,260 +581,224 @@ extension ScanController: RoomCaptureSessionDelegate {
 // MARK: - ARSessionDelegate
 
 extension ScanController: ARSessionDelegate {
-    func session(_ session: ARSession, didAdd anchors: [ARAnchor]) {
-        guard enableMeshStreaming else { return }
-        // Handle mesh anchors for detailed 3D reconstruction
-        for anchor in anchors {
-            if let meshAnchor = anchor as? ARMeshAnchor {
-                sendMeshUpdate(meshAnchor: meshAnchor)
-            }
-        }
-    }
-    
-    func session(_ session: ARSession, didUpdate anchors: [ARAnchor]) {
-        guard enableMeshStreaming else { return }
-        // Update mesh anchors as they refine
-        let currentTime = Date().timeIntervalSince1970
-        guard currentTime - lastMeshUpdateTime >= meshUpdateInterval else { return }
-        lastMeshUpdateTime = currentTime
-        
-        for anchor in anchors {
-            if let meshAnchor = anchor as? ARMeshAnchor {
-                sendMeshUpdate(meshAnchor: meshAnchor)
-            }
-        }
-    }
+    // Note: We only need didUpdate frame for JPEG preview streaming.
+    // RoomPlan handles room reconstruction through RoomCaptureSessionDelegate,
+    // which provides structured data (walls, doors, windows, objects) via room_update messages.
+    // Raw ARKit mesh anchors are not needed for this use case.
     
     func session(_ session: ARSession, didUpdate frame: ARFrame) {
-        guard WSClient.shared.isConnected else { return }
-        // Throttle to ~10 fps
-        let currentTime = Date().timeIntervalSince1970
-        guard currentTime - lastFrameTime >= frameInterval else { return }
+        // Check connection status
+        let isConnected: Bool
+        let canAcceptFrame: Bool
+        if let connectionManager = connectionManager {
+            isConnected = connectionManager.isConnected
+            canAcceptFrame = connectionManager.canAcceptFrame
+        } else {
+            isConnected = WSClient.shared.isConnected
+            canAcceptFrame = WSClient.shared.canAcceptFrame
+        }
+        guard isConnected else { return }
         
-        // Backpressure: skip this frame if still processing the previous one
-        // This prevents frame queue buildup which causes flickering
-        guard !isProcessingFrame else { return }
+        // Adaptive frame rate throttling
+        let currentTime = Date().timeIntervalSince1970
+        guard currentTime - lastFrameTime >= currentFrameInterval else { return }
+        
+        // Coordinated backpressure check: both local processing AND WebSocket must be ready
+        // Drop frame immediately if either is busy - never queue more than 1 frame
+        guard !isProcessingFrame && canAcceptFrame else {
+            // Frame dropped due to backpressure
+            totalFramesDropped += 1
+            framesSinceLastLog += 1
+            consecutiveDrops += 1
+            
+            // Adaptive rate: slow down if we're dropping too many frames
+            if consecutiveDrops >= dropThresholdForSlowdown {
+                currentFrameInterval = min(currentFrameInterval + adaptiveRateStep, maxFrameInterval)
+                consecutiveDrops = 0
+                frameLogger.info("Network congestion detected - reduced frame rate to \(1.0/currentFrameInterval) fps")
+            }
+            
+            logStatisticsIfNeeded()
+            return
+        }
+        
+        // Reset consecutive drops counter on successful acceptance
+        consecutiveDrops = 0
+        
+        // Speed up frame rate if we're not dropping frames (gradual recovery)
+        if currentFrameInterval > minFrameInterval {
+            currentFrameInterval = max(currentFrameInterval - adaptiveRateStep * 0.1, minFrameInterval)
+        }
         
         lastFrameTime = currentTime
         isProcessingFrame = true
+        totalFramesProcessed += 1
+        framesSinceLastLog += 1
         
-        // Copy pixel buffer reference before dispatching
+        // Track frame timestamp for FPS calculation
+        frameTimestamps.append(Date())
+        updateFPS()
+        
+        // Copy pixel buffer reference and camera info before dispatching
         let pixelBuffer = frame.capturedImage
+        let cameraTransform = frame.camera.transform
         
-        // Process on serial queue to ensure frame ordering
+        // Process on background queue - all Core Image operations must happen off main thread
+        // We've already checked backpressure, so this frame will be processed
         frameProcessingQueue.async { [weak self] in
             guard let self = self else { return }
             
             defer {
                 // Mark processing complete so next frame can be processed
+                // Thread-safe flag update (can be called from background queue)
                 self.isProcessingFrame = false
             }
             
-            guard let jpegData = self.convertPixelBufferToJPEG(pixelBuffer) else {
+            // Convert pixel buffer to JPEG - always called on frameProcessingQueue
+            // Pass camera transform for better orientation detection
+            guard let jpegData = self.convertPixelBufferToJPEG(pixelBuffer, cameraTransform: cameraTransform) else {
                 // Conversion failed, skip this frame
+                DispatchQueue.main.async {
+                    self.totalFramesDropped += 1
+                    self.logStatisticsIfNeeded()
+                }
                 return
             }
             
-            // Send as binary WebSocket message
-            WSClient.shared.sendJPEGFrame(jpegData)
+            // Send as binary WebSocket message - check result
+            // This can be called from background queue - WSClient handles thread safety
+            let accepted: Bool
+            if let connectionManager = self.connectionManager {
+                accepted = connectionManager.sendJPEGFrame(jpegData)
+            } else {
+                accepted = WSClient.shared.sendJPEGFrame(jpegData)
+            }
+            
+            if !accepted {
+                // Frame was rejected by WebSocket (shouldn't happen if we checked canAcceptFrame, but handle it)
+                DispatchQueue.main.async {
+                    self.totalFramesDropped += 1
+                    frameLogger.debug("Warning: Frame rejected by WebSocket despite canAcceptFrame check")
+                }
+            }
+            
+            DispatchQueue.main.async {
+                self.logStatisticsIfNeeded()
+            }
         }
     }
     
-    private func convertPixelBufferToJPEG(_ pixelBuffer: CVPixelBuffer) -> Data? {
+    // Log frame statistics periodically
+    private func logStatisticsIfNeeded() {
+        guard framesSinceLastLog >= statisticsLogInterval else { return }
+        
+        let dropRate = totalFramesProcessed > 0 ? Double(totalFramesDropped) / Double(totalFramesProcessed + totalFramesDropped) * 100.0 : 0.0
+        let targetFPS = 1.0 / currentFrameInterval
+        
+        frameLogger.debug("Frame Statistics: Processed: \(totalFramesProcessed), Dropped: \(totalFramesDropped), Drop Rate: \(String(format: "%.1f", dropRate))%, Actual FPS: \(String(format: "%.1f", actualFPS)), Target FPS: \(String(format: "%.1f", targetFPS)), Interval: \(String(format: "%.3f", currentFrameInterval))s")
+        
+        framesSinceLastLog = 0
+    }
+    
+    // Convert pixel buffer to JPEG - MUST be called on frameProcessingQueue
+    // All Core Image operations happen off the main thread
+    private func convertPixelBufferToJPEG(_ pixelBuffer: CVPixelBuffer, cameraTransform: simd_float4x4) -> Data? {
+        // Ensure we're on the correct queue (debug check)
+        assert(!Thread.isMainThread, "convertPixelBufferToJPEG must be called on frameProcessingQueue, not main thread")
+        
+        // Ensure CIContext is available (should be pre-warmed, but handle gracefully)
+        guard let context = ciContext else {
+            logger.debug("CIContext not available - creating fallback context")
+            // Fallback: create temporary context (not ideal, but prevents crash)
+            let fallbackContext = CIContext()
+            return convertPixelBufferToJPEGInternal(pixelBuffer: pixelBuffer, context: fallbackContext, cameraTransform: cameraTransform)
+        }
+        
+        return convertPixelBufferToJPEGInternal(pixelBuffer: pixelBuffer, context: context, cameraTransform: cameraTransform)
+    }
+    
+    // Internal conversion method - uses provided CIContext
+    private func convertPixelBufferToJPEGInternal(pixelBuffer: CVPixelBuffer, context: CIContext, cameraTransform: simd_float4x4) -> Data? {
         // Create CIImage from CVPixelBuffer
         let ciImage = CIImage(cvPixelBuffer: pixelBuffer)
         
-        // Use the reusable CIContext (critical for performance - creating new context per frame causes flickering)
-        guard let cgImage = ciContext.createCGImage(ciImage, from: ciImage.extent) else {
-            print("[ScanController] Failed to create CGImage from CIImage")
+        // Validate extent before creating CGImage
+        let extent = ciImage.extent
+        guard !extent.isInfinite && !extent.isNull && extent.width > 0 && extent.height > 0 else {
+            logger.error("Invalid CIImage extent: \(extent)")
             return nil
         }
         
-        // Convert to UIImage
-        // ARFrame images are typically in landscape orientation, adjust as needed
-        let uiImage = UIImage(cgImage: cgImage, scale: 1.0, orientation: .right)
+        // Create CGImage using CIContext - add comprehensive error handling
+        guard let cgImage = context.createCGImage(ciImage, from: extent) else {
+            logger.error("Failed to create CGImage from CIImage - extent: \(extent), image size: \(extent.width)x\(extent.height)")
+            return nil
+        }
+        
+        // Detect actual device orientation using camera transform and pixel buffer properties
+        let orientation = detectImageOrientation(from: pixelBuffer, cameraTransform: cameraTransform)
+        
+        // Convert to UIImage with detected orientation
+        let uiImage = UIImage(cgImage: cgImage, scale: 1.0, orientation: orientation)
         
         // Convert to JPEG Data with compression quality (0.6 = good balance of quality/size for streaming)
         guard let jpegData = uiImage.jpegData(compressionQuality: 0.6) else {
-            print("[ScanController] Failed to convert UIImage to JPEG")
+            logger.error("Failed to convert UIImage to JPEG")
             return nil
         }
         
         return jpegData
     }
     
-    // Send mesh update with colors and detail
-    // Uses verified ARKit APIs: ARMeshAnchor.geometry provides ARGeometrySource/ARGeometryElement
-    private func sendMeshUpdate(meshAnchor: ARMeshAnchor) {
-        guard let token = token else { return }
-        
-        let geometry = meshAnchor.geometry
-        let transform = meshAnchor.transform
-        
-        // Access vertices through ARGeometrySource - verified API
-        // ARMeshGeometry.vertices is an ARGeometrySource
-        let vertexSource = geometry.vertices
-        let vertexCount = vertexSource.count
-        
-        guard vertexCount > 0 else {
-            print("[ScanController] Empty mesh")
-            return
-        }
-        
-        // Extract vertices from ARGeometrySource buffer
-        var vertexArray: [[Float]] = []
-        let vertexBuffer = vertexSource.buffer.contents()
-        let vertexOffset = vertexSource.offset
-        let vertexStride = vertexSource.stride
-        
-        for i in 0..<vertexCount {
-            let pointer = vertexBuffer.advanced(by: vertexOffset + i * vertexStride)
-            let vertex = pointer.assumingMemoryBound(to: SIMD3<Float>.self).pointee
-            vertexArray.append([vertex.x, vertex.y, vertex.z])
-        }
-        
-        // Access faces through ARGeometryElement - verified API
-        // ARMeshGeometry.faces is an ARGeometryElement
-        let faceElement = geometry.faces
-        let faceCount = faceElement.count
-        var faceArray: [[Int]] = []
-        
-        // Extract face indices from ARGeometryElement buffer
-        // 1. Get the raw pointer to the buffer
-        let faceBuffer = faceElement.buffer.contents()
-
-        // 2. ARGeometryElement does not have an 'offset' property.
-        // If you need a starting point, it's typically 0.
-        let faceOffset = 0
-
-        // 3. Calculate stride: (number of indices per face) * (bytes per index)
-        let bytesPerIndex = faceElement.bytesPerIndex
-        let indicesPerPrimitive = faceElement.indexCountPerPrimitive
-        let faceStride = indicesPerPrimitive * bytesPerIndex
-        
-        for i in 0..<faceCount {
-            let base = faceBuffer.advanced(by: faceOffset + i * faceStride)
-            var indices: [Int] = []
-            indices.reserveCapacity(indicesPerPrimitive)
-            for j in 0..<indicesPerPrimitive {
-                let indexOffset = j * bytesPerIndex
-                if bytesPerIndex == 2 {
-                    let value = base.load(fromByteOffset: indexOffset, as: UInt16.self)
-                    indices.append(Int(value))
-                } else {
-                    let value = base.load(fromByteOffset: indexOffset, as: UInt32.self)
-                    indices.append(Int(value))
-                }
-            }
-            if indices.count >= 3 {
-                faceArray.append([indices[0], indices[1], indices[2]])
-            }
-        }
-        
-        // Get colors based on classification (semantic coloring)
-        // Note: ARKit provides per-face classification, not per-vertex
-        // We'll map face classifications to vertices by finding which faces use each vertex
-        var colorArray: [[Float]] = []
-        
-        // Get classification source (per-face data)
-        guard let classificationSource = geometry.classification else {
-            // No classification data available, use default gray for all vertices
-            for _ in 0..<vertexCount {
-                colorArray.append([0.5, 0.5, 0.5, 1.0])
-            }
-            return
-        }
-        
-        // Extract per-face classifications
-        let classificationBuffer = classificationSource.buffer.contents()
-        let classificationOffset = classificationSource.offset
-        let classificationStride = classificationSource.stride
-        
-        // Read classifications for each face
-        var faceClassifications: [ARMeshClassification] = []
-        for faceIndex in 0..<faceCount {
-            let pointer = classificationBuffer.advanced(by: classificationOffset + faceIndex * classificationStride)
-            // Classification is stored as UInt8 (MTLVertexFormat.uchar)
-            let classificationValue = pointer.load(as: UInt8.self)
-            let classification = ARMeshClassification(rawValue: Int(classificationValue)) ?? .none
-            faceClassifications.append(classification)
-        }
-        
-        // Map face classifications to vertices
-        // For each vertex, find faces that use it and use the first face's classification
-        var vertexClassifications: [ARMeshClassification] = Array(repeating: .none, count: vertexCount)
-        for (faceIndex, face) in faceArray.enumerated() {
-            if faceIndex < faceClassifications.count {
-                let classification = faceClassifications[faceIndex]
-                // Assign this classification to all vertices in this face
-                for vertexIndex in face {
-                    if vertexIndex < vertexCount && vertexClassifications[vertexIndex] == .none {
-                        vertexClassifications[vertexIndex] = classification
-                    }
+    // Detect image orientation from pixel buffer properties and camera transform
+    private func detectImageOrientation(from pixelBuffer: CVPixelBuffer, cameraTransform: simd_float4x4) -> UIImage.Orientation {
+        // First, check pixel buffer attachment for orientation hint (most accurate)
+        if let orientationValue = CVBufferGetAttachment(pixelBuffer, kCVImagePropertyOrientation, nil) {
+            if let orientationNumber = orientationValue.takeUnretainedValue() as? NSNumber {
+                let orientationInt = orientationNumber.intValue
+                // Map CGImagePropertyOrientation (EXIF) to UIImage.Orientation
+                switch orientationInt {
+                case 1: return .up           // EXIF: 1 = 0° (normal)
+                case 3: return .down         // EXIF: 3 = 180°
+                case 6: return .right        // EXIF: 6 = 90° CCW
+                case 8: return .left        // EXIF: 8 = 90° CW
+                case 2: return .upMirrored
+                case 4: return .downMirrored
+                case 5: return .leftMirrored
+                case 7: return .rightMirrored
+                default: break
                 }
             }
         }
         
-        // Assign colors based on vertex classifications
-        for classification in vertexClassifications {
-            let color = getColorForClassification(classification)
-            colorArray.append([color.r, color.g, color.b, 1.0])
+        // Fallback: Use device orientation (less accurate but better than hardcoding)
+        // Note: UIDevice orientation can be unreliable, but it's better than nothing
+        let deviceOrientation = UIDevice.current.orientation
+        
+        // For ARKit, the camera sensor orientation is typically fixed relative to device
+        // Most iOS devices have cameras that produce landscape-right images
+        // We adjust based on how the device is held
+        switch deviceOrientation {
+        case .portrait:
+            // Device held portrait - camera image is rotated 90° CCW
+            return .right
+        case .portraitUpsideDown:
+            // Device held portrait upside down - camera image is rotated 90° CW
+            return .left
+        case .landscapeLeft:
+            // Device held landscape left - camera image is normal
+            return .up
+        case .landscapeRight:
+            // Device held landscape right - camera image is upside down
+            return .down
+        case .faceUp, .faceDown:
+            // Device flat - use default based on camera position
+            // Most devices: landscape right is default
+            return .right
+        default:
+            // Unknown orientation - default to right (most common for AR scanning in landscape)
+            return .right
         }
-        
-        // Flatten transform matrix
-        var transformArray: [Float] = []
-        transformArray.append(transform.columns.0.x)
-        transformArray.append(transform.columns.0.y)
-        transformArray.append(transform.columns.0.z)
-        transformArray.append(transform.columns.0.w)
-        transformArray.append(transform.columns.1.x)
-        transformArray.append(transform.columns.1.y)
-        transformArray.append(transform.columns.1.z)
-        transformArray.append(transform.columns.1.w)
-        transformArray.append(transform.columns.2.x)
-        transformArray.append(transform.columns.2.y)
-        transformArray.append(transform.columns.2.z)
-        transformArray.append(transform.columns.2.w)
-        transformArray.append(transform.columns.3.x)
-        transformArray.append(transform.columns.3.y)
-        transformArray.append(transform.columns.3.z)
-        transformArray.append(transform.columns.3.w)
-        
-        let message: [String: Any] = [
-            "type": "mesh_update",
-            "token": token,
-            "anchorId": meshAnchor.identifier.uuidString,
-            "vertices": vertexArray,
-            "faces": faceArray,
-            "colors": colorArray,
-            "transform": transformArray,
-            "t": Int(Date().timeIntervalSince1970)
-        ]
-        
-        sendMessage(message)
     }
     
-    // Get color based on classification (semantic coloring)
-    private func getColorForClassification(_ classification: ARMeshClassification) -> (r: Float, g: Float, b: Float) {
-        switch classification {
-        case .wall:
-            return (0.8, 0.8, 0.9) // Light gray-blue for walls
-        case .floor:
-            return (0.7, 0.7, 0.7) // Gray for floor
-        case .ceiling:
-            return (0.9, 0.9, 0.9) // White for ceiling
-        case .table:
-            return (0.6, 0.4, 0.2) // Brown for tables
-        case .seat:
-            return (0.4, 0.2, 0.6) // Purple for seats
-        case .window:
-            return (0.5, 0.7, 0.9) // Light blue for windows
-        case .door:
-            return (0.5, 0.3, 0.1) // Brown for doors
-        case .none:
-            return (0.5, 0.5, 0.5) // Gray for unclassified
-        @unknown default:
-            return (0.5, 0.5, 0.5) // Default gray
-        }
-    }
 }

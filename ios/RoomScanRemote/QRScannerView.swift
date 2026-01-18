@@ -8,6 +8,7 @@
 import SwiftUI
 import AVFoundation
 import AudioToolbox
+import UIKit
 
 struct QRScannerView: UIViewControllerRepresentable {
     @Binding var scannedToken: String?
@@ -46,7 +47,7 @@ struct QRScannerView: UIViewControllerRepresentable {
 }
 
 protocol QRScannerDelegate: AnyObject {
-    func didScanQRCode(token: String?, host: String?, port: Int?)
+    func didScanQRCode(token: String?, host: String?, port: Int?, error: String?)
 }
 
 class QRScannerViewController: UIViewController {
@@ -85,7 +86,7 @@ class QRScannerViewController: UIViewController {
     
     private func setupCamera() {
         guard let videoCaptureDevice = AVCaptureDevice.default(for: .video) else {
-            print("[QRScanner] No video capture device available")
+            logger.error("No video capture device available")
             return
         }
         
@@ -94,7 +95,7 @@ class QRScannerViewController: UIViewController {
         do {
             videoInput = try AVCaptureDeviceInput(device: videoCaptureDevice)
         } catch {
-            print("[QRScanner] Error creating video input: \(error)")
+            logger.error("Error creating video input: \(error.localizedDescription)")
             return
         }
         
@@ -104,7 +105,7 @@ class QRScannerViewController: UIViewController {
         if captureSession.canAddInput(videoInput) {
             captureSession.addInput(videoInput)
         } else {
-            print("[QRScanner] Cannot add video input")
+            logger.error("Cannot add video input")
             return
         }
         
@@ -116,7 +117,7 @@ class QRScannerViewController: UIViewController {
             metadataOutput.setMetadataObjectsDelegate(self, queue: DispatchQueue.main)
             metadataOutput.metadataObjectTypes = [.qr]
         } else {
-            print("[QRScanner] Cannot add metadata output")
+            logger.error("Cannot add metadata output")
             return
         }
         
@@ -171,7 +172,7 @@ class QRScannerViewController: UIViewController {
         dismiss(animated: true)
     }
     
-    private func parseQRCode(_ string: String) -> (token: String?, host: String?, port: Int?) {
+    private func parseQRCode(_ string: String) -> (token: String?, host: String?, port: Int?, error: String?) {
         // Try to parse roomscan://pair?token=...&host=...&port=...
         if let url = URL(string: string),
            url.scheme == "roomscan",
@@ -184,7 +185,14 @@ class QRScannerViewController: UIViewController {
             let portValue = queryItems?.first(where: { $0.name == "port" })?.value
             let port = portValue.flatMap { Int($0) }
             
-            return (token, host, port)
+            if token == nil {
+                return (nil, nil, nil, "QR code missing session token. Expected format: roomscan://pair?token=...&host=...&port=...")
+            }
+            if host == nil {
+                return (nil, nil, nil, "QR code missing server address. Expected format: roomscan://pair?token=...&host=...&port=...")
+            }
+            
+            return (token, host, port, nil)
         }
         
         // Try to parse http://.../download/<token>/room.usdz
@@ -195,7 +203,10 @@ class QRScannerViewController: UIViewController {
                 if let tokenIndex = pathComponents.firstIndex(of: "download"), tokenIndex + 1 < pathComponents.count {
                     let token = pathComponents[tokenIndex + 1]
                     let host = url.host
-                    return (token, host, url.port)
+                    if token.isEmpty {
+                        return (nil, nil, nil, "QR code missing session token in URL path. Expected format: http://host:port/download/<token>/room.usdz")
+                    }
+                    return (token, host, url.port, nil)
                 }
             }
         }
@@ -206,10 +217,14 @@ class QRScannerViewController: UIViewController {
            let queryItems = components.queryItems {
             let token = queryItems.first(where: { $0.name == "token" })?.value
             let host = queryItems.first(where: { $0.name == "host" })?.value ?? url.host
-            return (token, host, url.port)
+            if token == nil {
+                return (nil, nil, nil, "QR code missing token parameter. Expected format: http://host:port?token=...&host=...")
+            }
+            return (token, host, url.port, nil)
         }
         
-        return (nil, nil, nil)
+        // No valid format found
+        return (nil, nil, nil, "Invalid QR code format. Expected one of:\n• roomscan://pair?token=<session_token>&host=<server>&port=<port>\n• http://host:port/download/<session_token>/room.usdz\n• http://host:port?token=<session_token>&host=<server>")
     }
 }
 
@@ -223,13 +238,23 @@ extension QRScannerViewController: AVCaptureMetadataOutputObjectsDelegate {
             captureSession?.stopRunning()
             
             // Parse QR code
-            let (token, host, port) = parseQRCode(stringValue)
+            let (token, host, port, error) = parseQRCode(stringValue)
             
-            // Vibrate on success
-            AudioServicesPlaySystemSound(SystemSoundID(kSystemSoundID_Vibrate))
+            if error == nil && token != nil {
+                // Success - provide haptic feedback
+                let generator = UINotificationFeedbackGenerator()
+                generator.notificationOccurred(.success)
+                
+                // Also vibrate for older devices
+                AudioServicesPlaySystemSound(SystemSoundID(kSystemSoundID_Vibrate))
+            } else {
+                // Error - provide error haptic feedback
+                let generator = UINotificationFeedbackGenerator()
+                generator.notificationOccurred(.error)
+            }
             
             // Notify delegate
-            delegate?.didScanQRCode(token: token, host: host, port: port)
+            delegate?.didScanQRCode(token: token, host: host, port: port, error: error)
         }
     }
 }
