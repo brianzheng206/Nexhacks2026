@@ -1,0 +1,13 @@
+# SwiftLint configuration for basic syntax checking
+# Note: This won't catch iOS framework issues, but helps with Swift syntax
+
+disabled_rules:
+  - trailing_whitespace
+  - line_length
+
+included:
+  - RoomScanRemote
+
+excluded:
+  - Pods
+  - .build

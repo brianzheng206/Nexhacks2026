@@ -163,22 +163,8 @@ class WSClient: ObservableObject {
     }
     
     private func handleBinaryMessage(_ data: Data) {
-        // Binary messages are JPEG frames - we'll handle these when implementing RoomPlan
-        print("[WSClient] Received binary data: \(data.count) bytes")
-    }
-    
-    func sendJPEGFrame(_ data: Data) {
-        guard isConnected else {
-            // Silently skip if not connected (avoid log spam)
-            return
-        }
-        
-        let message = URLSessionWebSocketTask.Message.data(data)
-        webSocketTask?.send(message) { error in
-            if let error = error {
-                print("[WSClient] Error sending JPEG frame (\(data.count) bytes): \(error)")
-            }
-        }
+        // Binary messages no longer used - mesh is displayed via HTTP polling
+        print("[WSClient] Received binary data: \(data.count) bytes (ignored)")
     }
     
     func sendMessage(_ jsonString: String) {
