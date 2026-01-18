@@ -597,9 +597,11 @@ app.get('/debug/session', (req, res) => {
 });
 
 // Start server
-server.listen(PORT, () => {
+// Listen on 0.0.0.0 to accept both localhost (USB) and network (WiFi) connections
+server.listen(PORT, '0.0.0.0', () => {
   console.log(`[SERVER] Express server running on port ${PORT}`);
   console.log(`[SERVER] WebSocket server ready at ws://localhost:${PORT}/ws`);
+  console.log(`[SERVER] Accepting connections from: localhost (USB) and network (WiFi)`);
   console.log(`[SERVER] Worker URL: ${WORKER_URL}`);
   console.log(`[SERVER] Data directory: ${DATA_DIR}`);
 });

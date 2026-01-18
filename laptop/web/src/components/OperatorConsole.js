@@ -313,7 +313,7 @@ function OperatorConsole() {
         </div>
 
         <div className="console-right">
-          <MeshViewer token={token} serverUrl={SERVER_URL} />
+          <MeshViewer token={token} serverUrl={SERVER_URL} ws={ws} />
           {/* Preview panel hidden - showing mesh generation instead for smoother experience */}
           {previewImage && (
             <div style={{display: 'none'}}>

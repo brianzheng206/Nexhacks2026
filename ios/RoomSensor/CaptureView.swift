@@ -14,6 +14,7 @@ struct CaptureView: View {
     @State private var isScanning: Bool = false
     @State private var errorMessage: String?
     @State private var showError: Bool = false
+    @State private var showMeshViewer: Bool = false
     
     var body: some View {
         ZStack {
@@ -112,6 +113,21 @@ struct CaptureView: View {
                     .foregroundColor(.white)
                     .cornerRadius(10)
                 }
+                
+                Button(action: {
+                    showMeshViewer = true
+                }) {
+                    HStack {
+                        Image(systemName: "cube.transparent.fill")
+                        Text("View 3D Mesh")
+                            .fontWeight(.semibold)
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding()
+                    .background(Color.blue)
+                    .foregroundColor(.white)
+                    .cornerRadius(10)
+                }
             }
             .padding(.horizontal, 24)
             .padding(.bottom, 40)
@@ -133,23 +149,20 @@ struct CaptureView: View {
         } message: {
             Text(errorMessage ?? "Unknown error")
         }
-    }
-}
-
-// MARK: - ARViewContainer
-
-struct ARViewContainer: UIViewRepresentable {
-    let session: ARSession
-    
-    func makeUIView(context: Context) -> ARSCNView {
-        let arView = ARSCNView()
-        arView.session = session
-        arView.automaticallyUpdatesLighting = true
-        return arView
-    }
-    
-    func updateUIView(_ uiView: ARSCNView, context: Context) {
-        // No updates needed
+        .sheet(isPresented: $showMeshViewer) {
+            NavigationView {
+                MeshViewerView()
+                    .environmentObject(appState)
+                    .navigationBarTitleDisplayMode(.inline)
+                    .toolbar {
+                        ToolbarItem(placement: .navigationBarTrailing) {
+                            Button("Done") {
+                                showMeshViewer = false
+                            }
+                        }
+                    }
+            }
+        }
     }
     
     private var statusText: String {
@@ -190,8 +203,23 @@ struct ARViewContainer: UIViewRepresentable {
     
     private func resetSession() {
         appState.resetSession()
-        // Show confirmation
-        // In a real app, you might want to show an alert
+    }
+}
+
+// MARK: - ARViewContainer
+
+struct ARViewContainer: UIViewRepresentable {
+    let session: ARSession
+    
+    func makeUIView(context: Context) -> ARSCNView {
+        let arView = ARSCNView()
+        arView.session = session
+        arView.automaticallyUpdatesLighting = true
+        return arView
+    }
+    
+    func updateUIView(_ uiView: ARSCNView, context: Context) {
+        // No updates needed
     }
 }
 

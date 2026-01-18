@@ -1,16 +1,21 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useRef, useState, useCallback } from 'react';
 import * as THREE from 'three';
 import { PLYLoader } from 'three/examples/jsm/loaders/PLYLoader.js';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import './MeshViewer.css';
 
-function MeshViewer({ token, serverUrl }) {
+function MeshViewer({ token, serverUrl, ws }) {
   const mountRef = useRef(null);
   const sceneRef = useRef(null);
   const rendererRef = useRef(null);
   const controlsRef = useRef(null);
+  const cameraRef = useRef(null);
   const meshRef = useRef(null);
-  const [meshStatus, setMeshStatus] = useState('No mesh available');
+  const [meshStatus, setMeshStatus] = useState('Waiting for mesh data...');
+  const [meshStats, setMeshStats] = useState({ vertices: 0, triangles: 0 });
+  const [isLoading, setIsLoading] = useState(false);
+  const lastMeshHashRef = useRef(null);
+  const animationFrameRef = useRef(null);
 
   useEffect(() => {
     if (!mountRef.current || !token) return;
@@ -26,7 +31,9 @@ function MeshViewer({ token, serverUrl }) {
       0.1,
       1000
     );
-    camera.position.set(0, 0, 5);
+    camera.position.set(5, 5, 5);
+    camera.lookAt(0, 0, 0);
+    cameraRef.current = camera;
 
     const renderer = new THREE.WebGLRenderer({ antialias: true });
     renderer.setSize(mountRef.current.clientWidth, mountRef.current.clientHeight);
@@ -34,24 +41,52 @@ function MeshViewer({ token, serverUrl }) {
     mountRef.current.appendChild(renderer.domElement);
     rendererRef.current = renderer;
 
-    // Add orbit controls
+    // Add orbit controls with enhanced settings
     const controls = new OrbitControls(camera, renderer.domElement);
     controls.enableDamping = true;
-    controls.dampingFactor = 0.05;
+    controls.dampingFactor = 0.1;
+    controls.enablePan = true;
+    controls.enableZoom = true;
+    controls.enableRotate = true;
+    controls.minDistance = 0.5;
+    controls.maxDistance = 50;
+    controls.screenSpacePanning = false;
+    controls.target.set(0, 0, 0);
     controlsRef.current = controls;
 
-    // Add lights
-    const ambientLight = new THREE.AmbientLight(0xffffff, 0.6);
+    // Add enhanced lighting
+    const ambientLight = new THREE.AmbientLight(0xffffff, 0.5);
     scene.add(ambientLight);
-    const directionalLight = new THREE.DirectionalLight(0xffffff, 0.8);
-    directionalLight.position.set(5, 5, 5);
-    scene.add(directionalLight);
+    
+    const directionalLight1 = new THREE.DirectionalLight(0xffffff, 0.8);
+    directionalLight1.position.set(5, 10, 5);
+    scene.add(directionalLight1);
+    
+    const directionalLight2 = new THREE.DirectionalLight(0xffffff, 0.4);
+    directionalLight2.position.set(-5, 5, -5);
+    scene.add(directionalLight2);
+    
+    // Add hemisphere light for better overall illumination
+    const hemisphereLight = new THREE.HemisphereLight(0xffffff, 0x444444, 0.3);
+    scene.add(hemisphereLight);
+    
+    // Add grid helper for reference
+    const gridHelper = new THREE.GridHelper(10, 10, 0x888888, 0x444444);
+    scene.add(gridHelper);
+    
+    // Add axes helper
+    const axesHelper = new THREE.AxesHelper(2);
+    scene.add(axesHelper);
 
     // Animation loop
     const animate = () => {
-      requestAnimationFrame(animate);
-      controls.update();
-      renderer.render(scene, camera);
+      animationFrameRef.current = requestAnimationFrame(animate);
+      if (controlsRef.current) {
+        controlsRef.current.update();
+      }
+      if (rendererRef.current && sceneRef.current && cameraRef.current) {
+        rendererRef.current.render(sceneRef.current, cameraRef.current);
+      }
     };
     animate();
 
@@ -67,150 +102,176 @@ function MeshViewer({ token, serverUrl }) {
     // Cleanup
     return () => {
       window.removeEventListener('resize', handleResize);
-      if (mountRef.current && renderer.domElement) {
+      if (animationFrameRef.current) {
+        cancelAnimationFrame(animationFrameRef.current);
+      }
+      if (mountRef.current && renderer.domElement && mountRef.current.contains(renderer.domElement)) {
         mountRef.current.removeChild(renderer.domElement);
       }
       renderer.dispose();
+      if (meshRef.current) {
+        meshRef.current.geometry?.dispose();
+        meshRef.current.material?.dispose();
+      }
     };
   }, [token]);
 
-  // Poll for mesh every 2 seconds
-  useEffect(() => {
-    if (!token) return;
+  // Load mesh function
+  const loadMesh = useCallback(async () => {
+    if (!token || isLoading) return;
 
-    let lastMeshHash = null;
-    let isLoading = false;
-    let lastModified = null;
+    try {
+      setIsLoading(true);
+      
+      // Check if mesh exists using HEAD request
+      const checkResponse = await fetch(`${serverUrl}/mesh?token=${token}`, {
+        method: 'HEAD',
+        cache: 'no-cache'
+      });
 
-    const loadMesh = async () => {
-      if (isLoading) return; // Prevent concurrent loads
-
-      try {
-        // Check if mesh exists using HEAD request
-        const checkResponse = await fetch(`${serverUrl}/mesh?token=${token}`, {
-          method: 'HEAD'
-        });
-
-        if (!checkResponse.ok) {
-          if (checkResponse.status === 404) {
-            setMeshStatus('Waiting for chunks... Mesh will appear as chunks are processed');
-          } else {
-            setMeshStatus('Error checking mesh');
-          }
-          return;
+      if (!checkResponse.ok) {
+        if (checkResponse.status === 404) {
+          setMeshStatus('Waiting for mesh data... Scan in progress');
+          setIsLoading(false);
+        } else {
+          setMeshStatus('Error checking mesh');
+          setIsLoading(false);
         }
+        return;
+      }
 
-        // Check if mesh has changed (using ETag or Last-Modified if available)
-        const etag = checkResponse.headers.get('etag');
-        const lastModifiedHeader = checkResponse.headers.get('last-modified');
-        
-        // Check if mesh has changed
-        if (etag === lastMeshHash && meshRef.current && lastModified === lastModifiedHeader) {
-          // Mesh hasn't changed, skip reload
-          return;
-        }
-        
-        // Mesh has changed or is new
-        lastMeshHash = etag;
-        lastModified = lastModifiedHeader;
+      // Check if mesh has changed
+      const etag = checkResponse.headers.get('etag');
+      const lastModified = checkResponse.headers.get('last-modified');
+      
+      if (etag === lastMeshHashRef.current && meshRef.current) {
+        // Mesh hasn't changed, skip reload
+        setIsLoading(false);
+        return;
+      }
+      
+      // Mesh has changed or is new
+      lastMeshHashRef.current = etag;
 
-        isLoading = true;
-        setMeshStatus('Loading mesh...');
+      setMeshStatus('Loading mesh...');
 
-        // Mesh exists, load it
-        const loader = new PLYLoader();
-        // Add cache busting to force reload when file changes
-        const meshUrl = `${serverUrl}/mesh?token=${token}&t=${Date.now()}`;
+      // Load mesh with cache busting
+      const loader = new PLYLoader();
+      const meshUrl = `${serverUrl}/mesh?token=${token}&t=${Date.now()}`;
 
-        loader.load(
-          meshUrl,
-          (geometry) => {
-            const vertexCount = geometry.attributes.position?.count || 0;
-            const triangleCount = geometry.index ? geometry.index.count / 3 : (geometry.attributes.position ? geometry.attributes.position.count / 3 : 0);
-            setMeshStatus(`Building mesh... ${Math.floor(triangleCount).toLocaleString()} triangles, ${vertexCount.toLocaleString()} vertices`);
-            isLoading = false;
+      loader.load(
+        meshUrl,
+        (geometry) => {
+          const vertexCount = geometry.attributes.position?.count || 0;
+          const triangleCount = geometry.index 
+            ? geometry.index.count / 3 
+            : (geometry.attributes.position ? Math.floor(geometry.attributes.position.count / 3) : 0);
+          
+          setMeshStats({
+            vertices: vertexCount,
+            triangles: triangleCount
+          });
+          
+          setMeshStatus(`Mesh loaded: ${triangleCount.toLocaleString()} triangles, ${vertexCount.toLocaleString()} vertices`);
+          setIsLoading(false);
 
-            // Remove old mesh if exists
-            if (meshRef.current && sceneRef.current) {
-              sceneRef.current.remove(meshRef.current);
+          // Remove old mesh if exists
+          if (meshRef.current && sceneRef.current) {
+            sceneRef.current.remove(meshRef.current);
+            if (meshRef.current.geometry) {
               meshRef.current.geometry.dispose();
-              if (meshRef.current.material) {
+            }
+            if (meshRef.current.material) {
+              if (Array.isArray(meshRef.current.material)) {
+                meshRef.current.material.forEach(mat => mat.dispose());
+              } else {
                 meshRef.current.material.dispose();
               }
             }
-
-            // Compute normals if not present
-            if (!geometry.attributes.normal) {
-              geometry.computeVertexNormals();
-            }
-
-            // Create material
-            const material = new THREE.MeshStandardMaterial({
-              color: 0x888888,
-              flatShading: false,
-              vertexColors: geometry.hasAttribute('color')
-            });
-
-            // Create mesh
-            const mesh = new THREE.Mesh(geometry, material);
-            meshRef.current = mesh;
-            
-            if (sceneRef.current) {
-              sceneRef.current.add(mesh);
-
-              // Center and scale mesh
-              geometry.computeBoundingBox();
-              const box = geometry.boundingBox;
-              const center = new THREE.Vector3();
-              box.getCenter(center);
-              geometry.translate(-center.x, -center.y, -center.z);
-
-              // Scale to fit
-              const size = new THREE.Vector3();
-              box.getSize(size);
-              const maxDim = Math.max(size.x, size.y, size.z);
-              if (maxDim > 0) {
-                const scale = 2 / maxDim;
-                mesh.scale.multiplyScalar(scale);
-              }
-
-              // Update camera to view mesh
-              if (controlsRef.current) {
-                controlsRef.current.target.set(0, 0, 0);
-                controlsRef.current.update();
-              }
-            }
-          },
-          (progress) => {
-            if (progress.total > 0) {
-              const percent = (progress.loaded / progress.total) * 100;
-              setMeshStatus(`Loading mesh: ${percent.toFixed(0)}%`);
-            }
-          },
-          (error) => {
-            console.error('Error loading mesh:', error);
-            setMeshStatus('Error loading mesh');
-            isLoading = false;
           }
-        );
-      } catch (error) {
-        console.error('Error checking mesh:', error);
-        setMeshStatus('Error checking mesh');
-        isLoading = false;
-      }
-    };
+
+          // Compute normals if not present
+          if (!geometry.attributes.normal) {
+            geometry.computeVertexNormals();
+          }
+
+          // Create material with better appearance
+          const material = new THREE.MeshStandardMaterial({
+            color: 0x6b9bd1,
+            metalness: 0.1,
+            roughness: 0.7,
+            flatShading: false,
+            vertexColors: geometry.hasAttribute('color')
+          });
+
+          // Create mesh
+          const mesh = new THREE.Mesh(geometry, material);
+          meshRef.current = mesh;
+          
+          if (sceneRef.current) {
+            sceneRef.current.add(mesh);
+
+            // Center and scale mesh
+            geometry.computeBoundingBox();
+            const box = geometry.boundingBox;
+            const center = new THREE.Vector3();
+            box.getCenter(center);
+            geometry.translate(-center.x, -center.y, -center.z);
+
+            // Scale to fit view
+            const size = new THREE.Vector3();
+            box.getSize(size);
+            const maxDim = Math.max(size.x, size.y, size.z);
+            if (maxDim > 0) {
+              const scale = 3 / maxDim;
+              mesh.scale.multiplyScalar(scale);
+            }
+
+            // Update camera and controls to view mesh
+            if (controlsRef.current && cameraRef.current) {
+              controlsRef.current.target.set(0, 0, 0);
+              
+              // Set camera to nice viewing angle
+              const distance = maxDim * 1.5;
+              cameraRef.current.position.set(distance, distance * 0.7, distance);
+              cameraRef.current.lookAt(0, 0, 0);
+              controlsRef.current.update();
+            }
+          }
+        },
+        (progress) => {
+          if (progress.total > 0) {
+            const percent = (progress.loaded / progress.total) * 100;
+            setMeshStatus(`Loading mesh: ${percent.toFixed(0)}%`);
+          }
+        },
+        (error) => {
+          console.error('Error loading mesh:', error);
+          setMeshStatus('Error loading mesh');
+          setIsLoading(false);
+        }
+      );
+    } catch (error) {
+      console.error('Error checking mesh:', error);
+      setMeshStatus('Error checking mesh');
+      setIsLoading(false);
+    }
+  }, [token, serverUrl, isLoading]);
+
+  // Poll for mesh updates (faster polling for real-time feel)
+  useEffect(() => {
+    if (!token) return;
 
     // Load immediately
     loadMesh();
 
-    // Poll every 500ms for smooth real-time mesh updates
-    const interval = setInterval(loadMesh, 500);
+    // Poll every 300ms for smooth real-time mesh updates
+    const interval = setInterval(loadMesh, 300);
 
     return () => {
       clearInterval(interval);
-      isLoading = false;
     };
-  }, [token, serverUrl]);
+  }, [token, loadMesh]);
 
   if (!token) {
     return (
@@ -223,13 +284,45 @@ function MeshViewer({ token, serverUrl }) {
     );
   }
 
+  const handleResetView = () => {
+    if (controlsRef.current && cameraRef.current && meshRef.current) {
+      controlsRef.current.target.set(0, 0, 0);
+      cameraRef.current.position.set(5, 5, 5);
+      cameraRef.current.lookAt(0, 0, 0);
+      controlsRef.current.update();
+    }
+  };
+
   return (
     <div className="mesh-viewer">
-      <h2>Live 3D Mesh Generation</h2>
-      <div className="mesh-status">{meshStatus}</div>
-      <div ref={mountRef} className="mesh-container" style={{width: '100%', height: '500px', border: '1px solid #ccc', borderRadius: '8px'}} />
-      <div style={{marginTop: '10px', fontSize: '0.9em', color: '#666', padding: '0 1rem'}}>
-        Mesh updates automatically as chunks are processed. Rotate with mouse/touch.
+      <div className="mesh-header">
+        <h2>Live 3D Mesh</h2>
+        <button 
+          onClick={handleResetView}
+          className="reset-view-btn"
+          title="Reset camera view"
+        >
+          ↻ Reset View
+        </button>
+      </div>
+      <div className="mesh-status-bar">
+        <div className="mesh-status">{meshStatus}</div>
+        {meshStats.triangles > 0 && (
+          <div className="mesh-stats">
+            <span className="stat-item">Triangles: {meshStats.triangles.toLocaleString()}</span>
+            <span className="stat-item">Vertices: {meshStats.vertices.toLocaleString()}</span>
+          </div>
+        )}
+      </div>
+      <div ref={mountRef} className="mesh-container" />
+      <div className="mesh-controls-hint">
+        <div className="control-hint">
+          <strong>Controls:</strong>
+          <span>🖱️ Left Click + Drag: Rotate</span>
+          <span>🖱️ Right Click + Drag: Pan</span>
+          <span>🖱️ Scroll: Zoom</span>
+          <span>📱 Touch: Pinch to zoom, drag to rotate</span>
+        </div>
       </div>
     </div>
   );
