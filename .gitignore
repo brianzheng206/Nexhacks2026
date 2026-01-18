@@ -1,0 +1,44 @@
+# Dependencies
+node_modules/
+venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# Build outputs
+build/
+dist/
+*.egg-info/
+
+# Environment
+.env
+.env.local
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
+
+# Uploads
+laptop/server/uploads/
+
+# Test client
+test-phone-client/test-chunks/
+test-phone-client/node_modules/
+
+# iOS
+ios/build/
+ios/*.xcworkspace
+ios/*.xcuserdata/

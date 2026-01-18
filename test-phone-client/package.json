@@ -1,0 +1,15 @@
+{
+  "name": "test-phone-client",
+  "version": "1.0.0",
+  "description": "Test client to simulate iOS phone behavior",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "ws": "^8.14.2",
+    "form-data": "^4.0.0",
+    "node-fetch": "^2.7.0",
+    "archiver": "^6.0.1"
+  }
+}
