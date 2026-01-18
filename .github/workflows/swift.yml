@@ -1,0 +1,115 @@
+name: iOS Swift Build Check
+
+on:
+  push:
+    branches: [ main, phone-test-2 ]
+    paths:
+      - 'ios/**/*.swift'
+      - 'ios/**/*.xcodeproj/**'
+  pull_request:
+    branches: [ main, phone-test-2 ]
+    paths:
+      - 'ios/**/*.swift'
+      - 'ios/**/*.xcodeproj/**'
+
+jobs:
+  build:
+    runs-on: macos-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v3
+      
+    - name: Select Xcode version
+      run: |
+        if [ -d "/Applications/Xcode_15.0.app" ]; then
+          sudo xcode-select -s /Applications/Xcode_15.0.app/Contents/Developer
+        elif [ -d "/Applications/Xcode_15.1.app" ]; then
+          sudo xcode-select -s /Applications/Xcode_15.1.app/Contents/Developer
+        else
+          sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
+        fi
+      
+    - name: Show Xcode version
+      run: xcodebuild -version
+      
+    - name: List iOS directory
+      working-directory: ios
+      run: ls -la
+      
+    - name: Find Xcode project
+      working-directory: ios
+      id: find-project
+      run: |
+        echo "Looking for Xcode projects..."
+        if [ -d "RoomScanRemote.xcodeproj" ]; then
+          echo "✅ Found RoomScanRemote.xcodeproj"
+          echo "project=RoomScanRemote.xcodeproj" >> $GITHUB_OUTPUT
+          echo "scheme=RoomScanRemote" >> $GITHUB_OUTPUT
+          echo "found=true" >> $GITHUB_OUTPUT
+        elif [ -d "RoomSensor.xcodeproj" ]; then
+          echo "✅ Found RoomSensor.xcodeproj"
+          echo "project=RoomSensor.xcodeproj" >> $GITHUB_OUTPUT
+          echo "scheme=RoomSensor" >> $GITHUB_OUTPUT
+          echo "found=true" >> $GITHUB_OUTPUT
+        else
+          echo "⚠️  No Xcode project found - will validate Swift syntax only"
+          echo "found=false" >> $GITHUB_OUTPUT
+        fi
+        
+    - name: Build iOS project (if Xcode project exists)
+      if: steps.find-project.outputs.found == 'true'
+      working-directory: ios
+      run: |
+        echo "Building with xcodebuild..."
+        xcodebuild -project ${{ steps.find-project.outputs.project }} \
+          -scheme ${{ steps.find-project.outputs.scheme }} \
+          -sdk iphonesimulator \
+          -destination 'platform=iOS Simulator,name=iPhone 15,OS=latest' \
+          clean build \
+          CODE_SIGN_IDENTITY="" \
+          CODE_SIGNING_REQUIRED=NO \
+          CODE_SIGNING_ALLOWED=NO
+      continue-on-error: false
+      
+    - name: Validate Swift syntax (if no Xcode project)
+      if: steps.find-project.outputs.found == 'false'
+      working-directory: ios
+      run: |
+        echo "Validating Swift file syntax..."
+        echo "Note: This is a basic check. Full compilation requires an Xcode project."
+        
+        # Check if Swift compiler is available
+        if ! command -v swiftc &> /dev/null; then
+          echo "⚠️  Swift compiler not found - skipping syntax validation"
+          echo "✅ Swift files exist but cannot be validated without Xcode project"
+          exit 0
+        fi
+        
+        # Try to parse each Swift file
+        errors=0
+        for file in RoomScanRemote/**/*.swift; do
+          if [ -f "$file" ]; then
+            echo "Checking: $file"
+            if ! swiftc -parse "$file" 2>&1 | grep -v "error:"; then
+              echo "  ✅ Syntax OK"
+            else
+              echo "  ❌ Syntax errors found"
+              errors=$((errors + 1))
+            fi
+          fi
+        done
+        
+        if [ $errors -gt 0 ]; then
+          echo "❌ Found $errors file(s) with syntax errors"
+          exit 1
+        else
+          echo "✅ All Swift files have valid syntax"
+          echo "💡 To test full compilation, create an Xcode project and commit it"
+        fi
+      
+    - name: Check for build errors
+      if: failure()
+      run: |
+        echo "❌ Build/validation failed! Check the logs above for errors."
+        exit 1
