@@ -25,74 +25,137 @@ struct ScanView: View {
     @State private var wasConnected: Bool = false
     
     var body: some View {
-        VStack(spacing: 30) {
-            Text("RoomScan Remote")
-                .font(.title)
-                .fontWeight(.bold)
-                .padding(.top)
+        ZStack {
+            // Dark background
+            Color.appBackground
+                .ignoresSafeArea()
             
-            // Status display
-            VStack(spacing: 10) {
-                Text("Status")
-                    .font(.headline)
-                Text(statusMessage)
-                    .font(.body)
-                    .foregroundColor(statusColor)
-                    .padding()
-                    .frame(maxWidth: .infinity)
-                    .background(Color.gray.opacity(0.1))
-                    .cornerRadius(10)
-            }
-            .padding(.horizontal)
-            
-            // Local controls (for testing)
-            if showLocalControls {
-                VStack(spacing: 15) {
-                    Button(action: startScan) {
-                        Text("Start Scan")
-                            .fontWeight(.semibold)
-                            .frame(maxWidth: .infinity)
-                            .padding()
-                            .background(Color.green)
-                            .foregroundColor(.white)
-                            .cornerRadius(10)
+            ScrollView {
+                VStack(spacing: 24) {
+                    // Header
+                    VStack(spacing: 8) {
+                        Text("RoomScan Remote")
+                            .font(.system(size: 28, weight: .bold))
+                            .foregroundColor(.appText)
+                        
+                        // Status indicator
+                        HStack(spacing: 8) {
+                            Circle()
+                                .fill(statusColor)
+                                .frame(width: 10, height: 10)
+                            Text(statusMessage)
+                                .font(.subheadline)
+                                .foregroundColor(.appTextSecondary)
+                        }
+                        .padding(.top, 4)
                     }
-                    .disabled(scanController.isScanning || !WSClient.shared.isConnected || !RoomCaptureSession.isSupported)
+                    .padding(.top, 20)
+                    .padding(.bottom, 10)
                     
-                    Button(action: stopScan) {
-                        Text("Stop Scan")
-                            .fontWeight(.semibold)
-                            .frame(maxWidth: .infinity)
-                            .padding()
-                            .background(Color.red)
-                            .foregroundColor(.white)
+                    // Status card
+                    VStack(alignment: .leading, spacing: 12) {
+                        HStack {
+                            Image(systemName: statusIcon)
+                                .foregroundColor(statusColor)
+                                .font(.system(size: 20))
+                            Text("Status")
+                                .font(.headline)
+                                .foregroundColor(.appText)
+                        }
+                        
+                        Text(statusMessage)
+                            .font(.body)
+                            .foregroundColor(statusColor)
+                            .padding(.vertical, 12)
+                            .padding(.horizontal, 16)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .background(Color.appPanel)
                             .cornerRadius(10)
                     }
-                    .disabled(!scanController.isScanning)
+                    .padding(.horizontal, 24)
+                    
+                    // Local controls (for testing)
+                    if showLocalControls {
+                        VStack(spacing: 12) {
+                            Button(action: startScan) {
+                                HStack(spacing: 10) {
+                                    Image(systemName: "play.fill")
+                                        .font(.system(size: 16, weight: .semibold))
+                                    Text("Start Scan")
+                                        .fontWeight(.semibold)
+                                }
+                                .frame(maxWidth: .infinity)
+                                .padding(.vertical, 16)
+                                .background(
+                                    scanController.isScanning || !WSClient.shared.isConnected || !RoomCaptureSession.isSupported
+                                    ? Color.buttonDisabled
+                                    : Color.buttonSuccess
+                                )
+                                .foregroundColor(.white)
+                                .cornerRadius(12)
+                            }
+                            .disabled(scanController.isScanning || !WSClient.shared.isConnected || !RoomCaptureSession.isSupported)
+                            
+                            Button(action: stopScan) {
+                                HStack(spacing: 10) {
+                                    Image(systemName: "stop.fill")
+                                        .font(.system(size: 16, weight: .semibold))
+                                    Text("Stop Scan")
+                                        .fontWeight(.semibold)
+                                }
+                                .frame(maxWidth: .infinity)
+                                .padding(.vertical, 16)
+                                .background(!scanController.isScanning ? Color.buttonDisabled : Color.buttonDanger)
+                                .foregroundColor(.white)
+                                .cornerRadius(12)
+                            }
+                            .disabled(!scanController.isScanning)
+                        }
+                        .padding(.horizontal, 24)
+                    }
+                    
+                    // Connection info card
+                    VStack(alignment: .leading, spacing: 12) {
+                        HStack {
+                            Image(systemName: "info.circle.fill")
+                                .foregroundColor(.appAccent)
+                                .font(.system(size: 18))
+                            Text("Connection Info")
+                                .font(.headline)
+                                .foregroundColor(.appText)
+                        }
+                        
+                        VStack(alignment: .leading, spacing: 8) {
+                            HStack {
+                                Text("IP:")
+                                    .font(.caption)
+                                    .foregroundColor(.appTextSecondary)
+                                Text(laptopIP)
+                                    .font(.system(.caption, design: .monospaced))
+                                    .foregroundColor(.appText)
+                            }
+                            
+                            HStack {
+                                Text("Token:")
+                                    .font(.caption)
+                                    .foregroundColor(.appTextSecondary)
+                                Text(token)
+                                    .font(.system(.caption, design: .monospaced))
+                                    .foregroundColor(.appText)
+                            }
+                        }
+                        .padding(.vertical, 12)
+                        .padding(.horizontal, 16)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(Color.appPanel)
+                        .cornerRadius(10)
+                    }
+                    .padding(.horizontal, 24)
+                    
+                    Spacer(minLength: 40)
                 }
-                .padding(.horizontal)
             }
-            
-            // Connection info
-            VStack(alignment: .leading, spacing: 5) {
-                Text("Connection Info")
-                    .font(.headline)
-                Text("IP: \(laptopIP)")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-                Text("Token: \(token)")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-            }
-            .padding()
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(Color.gray.opacity(0.1))
-            .cornerRadius(10)
-            .padding(.horizontal)
-            
-            Spacer()
         }
-        .padding()
         .navigationBarTitleDisplayMode(.inline)
         .alert("Connection Lost", isPresented: $showReconnectAlert) {
             Button("Reconnect") {
@@ -122,13 +185,26 @@ struct ScanView: View {
     private var statusColor: Color {
         switch statusMessage.lowercased() {
         case "connected":
-            return .green
+            return .statusConnected
         case "scanning":
-            return .blue
-        case "disconnected":
-            return .red
+            return .statusScanning
+        case "disconnected", "disconnected - please reconnect":
+            return .statusError
         default:
-            return .orange
+            return .statusWarning
+        }
+    }
+    
+    private var statusIcon: String {
+        switch statusMessage.lowercased() {
+        case "connected":
+            return "checkmark.circle.fill"
+        case "scanning":
+            return "waveform.circle.fill"
+        case "disconnected", "disconnected - please reconnect":
+            return "xmark.circle.fill"
+        default:
+            return "exclamationmark.triangle.fill"
         }
     }
     

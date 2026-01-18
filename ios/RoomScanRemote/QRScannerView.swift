@@ -130,12 +130,13 @@ class QRScannerViewController: UIViewController {
             captureSession.startRunning()
         }
         
-        // Add cancel button
+        // Add cancel button with dark theme styling
         let cancelButton = UIButton(type: .system)
         cancelButton.setTitle("Cancel", for: .normal)
         cancelButton.setTitleColor(.white, for: .normal)
-        cancelButton.backgroundColor = UIColor.systemRed.withAlphaComponent(0.7)
-        cancelButton.layer.cornerRadius = 8
+        cancelButton.backgroundColor = UIColor(red: 0.4, green: 0.4, blue: 0.4, alpha: 0.8) // Dark gray with transparency
+        cancelButton.layer.cornerRadius = 12
+        cancelButton.titleLabel?.font = UIFont.systemFont(ofSize: 16, weight: .semibold)
         cancelButton.addTarget(self, action: #selector(cancelTapped), for: .touchUpInside)
         cancelButton.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(cancelButton)
@@ -147,22 +148,24 @@ class QRScannerViewController: UIViewController {
             cancelButton.heightAnchor.constraint(equalToConstant: 44)
         ])
         
-        // Add instruction label
+        // Add instruction label with dark theme styling
         let instructionLabel = UILabel()
         instructionLabel.text = "Point camera at QR code"
         instructionLabel.textColor = .white
         instructionLabel.textAlignment = .center
         instructionLabel.font = UIFont.systemFont(ofSize: 18, weight: .medium)
-        instructionLabel.backgroundColor = UIColor.black.withAlphaComponent(0.6)
-        instructionLabel.layer.cornerRadius = 8
+        instructionLabel.backgroundColor = UIColor(red: 0.1, green: 0.1, blue: 0.1, alpha: 0.8) // Dark background
+        instructionLabel.layer.cornerRadius = 12
+        instructionLabel.layer.borderWidth = 1
+        instructionLabel.layer.borderColor = UIColor(red: 0.4, green: 0.49, blue: 0.92, alpha: 0.5).cgColor // Accent color border
         instructionLabel.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(instructionLabel)
         
         NSLayoutConstraint.activate([
             instructionLabel.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor, constant: -40),
             instructionLabel.centerXAnchor.constraint(equalTo: view.centerXAnchor),
-            instructionLabel.widthAnchor.constraint(equalToConstant: 250),
-            instructionLabel.heightAnchor.constraint(equalToConstant: 44)
+            instructionLabel.widthAnchor.constraint(equalToConstant: 280),
+            instructionLabel.heightAnchor.constraint(equalToConstant: 50)
         ])
     }
     

@@ -8,6 +8,21 @@
 
 import SwiftUI
 
+// Custom text field style for dark theme
+struct DarkTextFieldStyle: TextFieldStyle {
+    func _body(configuration: TextField<Self._Label>) -> some View {
+        configuration
+            .padding(14)
+            .background(Color.appPanel)
+            .foregroundColor(.appText)
+            .cornerRadius(10)
+            .overlay(
+                RoundedRectangle(cornerRadius: 10)
+                    .stroke(Color.appBorder.opacity(0.3), lineWidth: 1)
+            )
+    }
+}
+
 struct PairingView: View {
     @State private var laptopIP: String = ""
     @State private var token: String = ""
@@ -20,75 +35,101 @@ struct PairingView: View {
     
     var body: some View {
         NavigationView {
-            VStack(spacing: 20) {
-                Text("RoomScan Remote")
-                    .font(.largeTitle)
-                    .fontWeight(.bold)
-                    .padding(.bottom, 40)
+            ZStack {
+                // Dark background
+                Color.appBackground
+                    .ignoresSafeArea()
                 
-                VStack(alignment: .leading, spacing: 10) {
-                    Text("Laptop IP Address")
-                        .font(.headline)
-                    TextField("e.g., 192.168.1.100", text: $laptopIP)
-                        .textFieldStyle(RoundedBorderTextFieldStyle())
-                        .keyboardType(.numbersAndPunctuation)
-                        .autocapitalization(.none)
-                        .disableAutocorrection(true)
-                }
-                
-                VStack(alignment: .leading, spacing: 10) {
-                    Text("Session Token")
-                        .font(.headline)
-                    TextField("Enter token", text: $token)
-                        .textFieldStyle(RoundedBorderTextFieldStyle())
-                        .autocapitalization(.none)
-                        .disableAutocorrection(true)
-                }
-                
-                if let error = errorMessage {
-                    Text(error)
-                        .foregroundColor(.red)
-                        .font(.caption)
-                        .padding(.horizontal)
-                }
-                
-                Button(action: { showQRScanner = true }) {
-                    HStack {
-                        Image(systemName: "qrcode.viewfinder")
-                            .font(.system(size: 20))
-                        Text("Scan QR Code")
-                            .fontWeight(.semibold)
+                VStack(spacing: 30) {
+                    // Header
+                    VStack(spacing: 8) {
+                        Text("RoomScan Remote")
+                            .font(.system(size: 32, weight: .bold))
+                            .foregroundColor(.appText)
+                        
+                        Text("Connect to your laptop")
+                            .font(.subheadline)
+                            .foregroundColor(.appTextSecondary)
                     }
-                    .frame(maxWidth: .infinity)
-                    .padding()
-                    .background(Color.green)
-                    .foregroundColor(.white)
-                    .cornerRadius(10)
-                }
-                .padding(.top, 10)
-                
-                Button(action: connect) {
-                    HStack {
-                        if isConnecting {
-                            ProgressView()
-                                .progressViewStyle(CircularProgressViewStyle(tint: .white))
-                                .padding(.trailing, 8)
+                    .padding(.top, 40)
+                    .padding(.bottom, 20)
+                    
+                    // Input fields
+                    VStack(spacing: 20) {
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text("Laptop IP Address")
+                                .font(.headline)
+                                .foregroundColor(.appText)
+                            TextField("e.g., 192.168.1.100 or localhost", text: $laptopIP)
+                                .textFieldStyle(DarkTextFieldStyle())
+                                .keyboardType(.numbersAndPunctuation)
+                                .autocapitalization(.none)
+                                .disableAutocorrection(true)
                         }
-                        Text(isConnecting ? "Connecting..." : "Connect")
-                            .fontWeight(.semibold)
+                        
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text("Session Token")
+                                .font(.headline)
+                                .foregroundColor(.appText)
+                            TextField("Enter token", text: $token)
+                                .textFieldStyle(DarkTextFieldStyle())
+                                .autocapitalization(.none)
+                                .disableAutocorrection(true)
+                        }
                     }
-                    .frame(maxWidth: .infinity)
-                    .padding()
-                    .background(isConnecting ? Color.gray : Color.blue)
-                    .foregroundColor(.white)
-                    .cornerRadius(10)
+                    .padding(.horizontal, 24)
+                    
+                    // Error message
+                    if let error = errorMessage {
+                        HStack {
+                            Image(systemName: "exclamationmark.triangle.fill")
+                                .foregroundColor(.statusError)
+                            Text(error)
+                                .foregroundColor(.statusError)
+                                .font(.caption)
+                        }
+                        .padding(.horizontal, 24)
+                    }
+                    
+                    // Buttons
+                    VStack(spacing: 12) {
+                        Button(action: { showQRScanner = true }) {
+                            HStack(spacing: 10) {
+                                Image(systemName: "qrcode.viewfinder")
+                                    .font(.system(size: 18, weight: .medium))
+                                Text("Scan QR Code")
+                                    .fontWeight(.semibold)
+                            }
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 16)
+                            .background(Color.buttonSuccess)
+                            .foregroundColor(.white)
+                            .cornerRadius(12)
+                        }
+                        
+                        Button(action: connect) {
+                            HStack(spacing: 10) {
+                                if isConnecting {
+                                    ProgressView()
+                                        .progressViewStyle(CircularProgressViewStyle(tint: .white))
+                                }
+                                Text(isConnecting ? "Connecting..." : "Connect")
+                                    .fontWeight(.semibold)
+                            }
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 16)
+                            .background(isConnecting || laptopIP.isEmpty || token.isEmpty ? Color.buttonDisabled : Color.buttonPrimary)
+                            .foregroundColor(.white)
+                            .cornerRadius(12)
+                        }
+                        .disabled(isConnecting || laptopIP.isEmpty || token.isEmpty)
+                    }
+                    .padding(.horizontal, 24)
+                    .padding(.top, 10)
+                    
+                    Spacer()
                 }
-                .disabled(isConnecting || laptopIP.isEmpty || token.isEmpty)
-                .padding(.top, 10)
-                
-                Spacer()
             }
-            .padding()
             .navigationBarHidden(true)
             .background(
                 NavigationLink(
