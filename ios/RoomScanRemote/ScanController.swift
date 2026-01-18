@@ -481,11 +481,17 @@ extension ScanController: ARSessionDelegate {
         var faceArray: [[Int]] = []
         
         // Extract face indices from ARGeometryElement buffer
+        // 1. Get the raw pointer to the buffer
         let faceBuffer = faceElement.buffer.contents()
-        let faceOffset = faceElement.offset
-        let faceStride = faceElement.stride
+
+        // 2. ARGeometryElement does not have an 'offset' property.
+        // If you need a starting point, it's typically 0.
+        let faceOffset = 0
+
+        // 3. Calculate stride: (number of indices per face) * (bytes per index)
         let bytesPerIndex = faceElement.bytesPerIndex
         let indicesPerPrimitive = faceElement.indexCountPerPrimitive
+        let faceStride = indicesPerPrimitive * bytesPerIndex
         
         for i in 0..<faceCount {
             let base = faceBuffer.advanced(by: faceOffset + i * faceStride)
@@ -524,7 +530,6 @@ extension ScanController: ARSessionDelegate {
         let classificationBuffer = classificationSource.buffer.contents()
         let classificationOffset = classificationSource.offset
         let classificationStride = classificationSource.stride
-        let faceCount = classificationSource.count
         
         // Read classifications for each face
         var faceClassifications: [ARMeshClassification] = []
