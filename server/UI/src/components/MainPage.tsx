@@ -147,10 +147,32 @@ export default function MainPage() {
           const d = JSON.parse(e.data);
           if (d.type === 'room_update') {
             setLogContent(JSON.stringify(d.stats || d.room || d, null, 2));
-            if (d.stats) setRoomStats(d.stats);
-            if (d.walls?.length) setFloorplanData(d.walls);
-          } else if (d.type === 'status') setPhoneConnected(d.value === 'phone_connected');
-          else if (d.type === 'export_ready') { setDownloadUrl(d.downloadUrl); setIsScanning(false); }
+            // iOS sends: { walls: count, doors: count, windows: count, objects: count }
+            // Map to frontend format for compatibility
+            if (d.stats) {
+              setRoomStats({
+                wallCount: d.stats.walls || 0,
+                doorCount: d.stats.doors || 0,
+                windowCount: d.stats.windows || 0,
+                objectCount: d.stats.objects || 0,
+                // Also keep original for JSON display
+                ...d.stats
+              });
+            }
+            // Update floorplan with walls data (real-time 3D visualization)
+            if (d.walls?.length) {
+              setFloorplanData(d.walls);
+              setIsScanning(true); // Show scanning indicator when walls are being detected
+            }
+          } else if (d.type === 'status') {
+            setPhoneConnected(d.value === 'phone_connected');
+            if (d.value === 'phone_disconnected') {
+              setIsScanning(false);
+            }
+          } else if (d.type === 'export_ready') {
+            setDownloadUrl(d.downloadUrl);
+            setIsScanning(false);
+          }
         } catch {}
       }
     };
@@ -322,13 +344,13 @@ export default function MainPage() {
 
           <div className="glass-card-strong rounded-2xl p-5 flex-1 flex flex-col min-h-0">
             <p className="text-xs font-medium text-white/40 uppercase tracking-wider mb-4">Room Data</p>
-            {roomStats && (
+            {(roomStats || floorplanData.length > 0) && (
               <div className="grid grid-cols-2 gap-2 mb-4">
                 {[
-                  { l: 'Walls', v: roomStats.wallCount || floorplanData.length || 0 },
-                  { l: 'Doors', v: roomStats.doorCount || 0 },
-                  { l: 'Windows', v: roomStats.windowCount || 0 },
-                  { l: 'Objects', v: roomStats.objectCount || 0 },
+                  { l: 'Walls', v: roomStats?.wallCount ?? floorplanData.length ?? 0 },
+                  { l: 'Doors', v: roomStats?.doorCount ?? 0 },
+                  { l: 'Windows', v: roomStats?.windowCount ?? 0 },
+                  { l: 'Objects', v: roomStats?.objectCount ?? 0 },
                 ].map(({ l, v }) => (
                   <div key={l} className="stats-card glass rounded-xl p-3">
                     <p className="text-[10px] text-white/40 uppercase">{l}</p>
