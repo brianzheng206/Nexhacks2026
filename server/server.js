@@ -403,9 +403,21 @@ function getLocalIP() {
   return ips[0] || 'localhost';
 }
 
+function normalizeHost(host) {
+  return (host || '').replace(/^\[|\]$/g, '').trim();
+}
+
+function isLoopback(host) {
+  return host === 'localhost' || host === '127.0.0.1';
+}
+
+function isAllowedHost(host, availableIPs) {
+  return isLoopback(host) || availableIPs.includes(host);
+}
+
 function getRequestHost(req) {
-  const host = (req.hostname || '').trim();
-  if (!host || host === 'localhost' || host === '127.0.0.1') {
+  const host = normalizeHost(req.hostname || '');
+  if (!host || isLoopback(host)) {
     return null;
   }
   return host;
@@ -445,10 +457,19 @@ app.get('/new', async (req, res) => {
   try {
     const requestedToken = typeof req.query.token === 'string' ? req.query.token.trim() : '';
     const token = requestedToken || generateToken();
+    const requestedHost = normalizeHost(typeof req.query.host === 'string' ? req.query.host : '');
+    const availableIPs = Array.from(new Set(getAllLocalIPs()));
     const requestHost = getRequestHost(req);
     const routeIP = await getDefaultRouteIP();
-    const localIP = requestHost || routeIP || getLocalIP();
-    const availableIPs = Array.from(new Set(getAllLocalIPs()));
+    let localIP = null;
+
+    if (requestedHost && isAllowedHost(requestedHost, availableIPs)) {
+      localIP = requestedHost;
+    }
+
+    if (!localIP) {
+      localIP = requestHost || routeIP || availableIPs[0] || getLocalIP();
+    }
     const url = `http://${localIP}:${PORT}/download/${token}/room.usdz`;
     
     // Create pairing URL with token and host

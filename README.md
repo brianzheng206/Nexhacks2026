@@ -84,8 +84,7 @@ The iOS app will:
 The server is designed to work independently without the iOS app. You can test the upload endpoint using curl:
 
 ```bash
-curl -X POST http://localhost:8080/upload/usdz \
-  -F "token=YOUR_TOKEN" \
+curl -X POST "http://localhost:8080/upload/usdz?token=YOUR_TOKEN" \
   -F "file=@path/to/room.usdz"
 ```
 
