@@ -236,9 +236,8 @@ struct PairingView: View {
         }
         
         // Check server reachability first
-        checkReachability(host: parsed.host, port: parsed.port) { [weak self] reachable, error in
-            guard let self = self else { return }
-            
+        // Note: PairingView is a struct, so we don't need [weak self] - structs don't have retain cycles
+        checkReachability(host: parsed.host, port: parsed.port) { reachable, error in
             if !reachable {
                 DispatchQueue.main.async {
                     self.isConnecting = false
@@ -248,8 +247,18 @@ struct PairingView: View {
             }
             
             // Server is reachable, proceed with WebSocket connection
-            self.connectionManager.connect(laptopHost: parsed.host, port: parsed.port, token: trimmedToken) { success, error in
+            // Call WSClient directly (like the old working version) but also update ConnectionManager state
+            let wsClient = WSClient.shared
+            wsClient.connect(laptopHost: parsed.host, port: parsed.port, token: trimmedToken) { success, error in
                 DispatchQueue.main.async {
+                    // Update ConnectionManager state to match
+                    if success {
+                        self.connectionManager.connectionState = .connected
+                    } else {
+                        let errorMessage = error ?? "Unknown error"
+                        self.connectionManager.connectionState = .failed(errorMessage)
+                    }
+                    
                     self.isConnecting = false
                     if success {
                         self.navigateToScan = true

@@ -17,6 +17,8 @@ import Combine
 import ARKit
 import RoomPlan
 import CoreImage
+import CoreVideo
+import ImageIO
 import UIKit
 
 private let logger = AppLogger.scanning
@@ -207,9 +209,8 @@ class ScanController: NSObject, ObservableObject {
             // Clear delegates before stopping to prevent any callbacks during cleanup
             existingSession.arSession.delegate = nil
             existingSession.delegate = nil
-            if existingSession.isActive {
-                existingSession.stop()
-            }
+            // Stop the session (safe to call even if already stopped)
+            existingSession.stop()
         }
         
         // Create new session - ScanController is the single source of truth
@@ -263,10 +264,8 @@ class ScanController: NSObject, ObservableObject {
             // Clear delegates first (order matters for cleanup)
             session.arSession.delegate = nil
             session.delegate = nil
-            // Stop the session
-            if session.isActive {
-                session.stop()
-            }
+            // Stop the session (safe to call even if already stopped)
+            session.stop()
             logger.info("Stopped and cleaned up RoomCaptureSession")
         }
         
@@ -293,10 +292,8 @@ class ScanController: NSObject, ObservableObject {
             // Always clear delegates first
             session.arSession.delegate = nil
             session.delegate = nil
-            // Stop if still active
-            if session.isActive {
-                session.stop()
-            }
+            // Stop the session (safe to call even if already stopped)
+            session.stop()
             // Update on main thread if we're not already on it
             if Thread.isMainThread {
                 roomCaptureSession = nil
@@ -753,8 +750,11 @@ extension ScanController: ARSessionDelegate {
     // Detect image orientation from pixel buffer properties and camera transform
     private func detectImageOrientation(from pixelBuffer: CVPixelBuffer, cameraTransform: simd_float4x4) -> UIImage.Orientation {
         // First, check pixel buffer attachment for orientation hint (most accurate)
-        if let orientationValue = CVBufferGetAttachment(pixelBuffer, kCVImagePropertyOrientation, nil) {
-            if let orientationNumber = orientationValue.takeUnretainedValue() as? NSNumber {
+        // Use CGImagePropertyOrientation key from ImageIO framework
+        if let orientationValue = CVBufferGetAttachment(pixelBuffer, kCGImagePropertyOrientation, nil) {
+            // The value is a CFNumber, extract the integer value
+            if CFGetTypeID(orientationValue) == CFNumberGetTypeID(),
+               let orientationNumber = orientationValue as? NSNumber {
                 let orientationInt = orientationNumber.intValue
                 // Map CGImagePropertyOrientation (EXIF) to UIImage.Orientation
                 switch orientationInt {

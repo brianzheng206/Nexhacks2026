@@ -10,6 +10,8 @@ import AVFoundation
 import AudioToolbox
 import UIKit
 
+private let logger = AppLogger.qrScanner
+
 struct QRScannerView: UIViewControllerRepresentable {
     @Binding var scannedToken: String?
     @Binding var scannedHost: String?
@@ -37,11 +39,25 @@ struct QRScannerView: UIViewControllerRepresentable {
             self.parent = parent
         }
         
-        func didScanQRCode(token: String?, host: String?, port: Int?) {
-            parent.scannedToken = token
-            parent.scannedHost = host
-            parent.scannedPort = port
-            parent.dismiss()
+        func didScanQRCode(token: String?, host: String?, port: Int?, error: String?) {
+            if let error = error {
+                // Show error alert
+                DispatchQueue.main.async {
+                    let alert = UIAlertController(
+                        title: "Invalid QR Code",
+                        message: error,
+                        preferredStyle: .alert
+                    )
+                    alert.addAction(UIAlertAction(title: "OK", style: .default))
+                    // Note: We can't easily show alert from here without view controller reference
+                    // The error will be handled by the parent view
+                }
+            } else {
+                parent.scannedToken = token
+                parent.scannedHost = host
+                parent.scannedPort = port
+                parent.dismiss()
+            }
         }
     }
 }

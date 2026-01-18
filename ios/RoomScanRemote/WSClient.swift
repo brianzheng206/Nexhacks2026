@@ -30,16 +30,27 @@ class WSClient {
     private var helloCompletion: ((Bool, String?) -> Void)?
     private var isWaitingForHelloAck: Bool = false
     
+    // Connection timeout timers
+    private var connectionTimeoutTimer: Timer?
+    private var helloAckTimeoutTimer: Timer?
+    private let connectionTimeout: TimeInterval = 10.0
+    private let helloAckTimeout: TimeInterval = 5.0
+    
     private init() {}
     
     func connect(laptopHost: String, port: Int = 8080, token: String, completion: @escaping (Bool, String?) -> Void) {
+        logger.info("========== CONNECT CALLED ==========")
+        logger.info("Host: \(laptopHost), Port: \(port), Token length: \(token.count)")
+        
         let trimmedHost = laptopHost.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedHost.isEmpty else {
+            logger.error("Invalid server address - empty host")
             completion(false, "Invalid server address")
             return
         }
 
         // Cancel any existing timers
+        logger.debug("Cancelling any existing timers...")
         connectionTimeoutTimer?.invalidate()
         helloAckTimeoutTimer?.invalidate()
         connectionTimeoutTimer = nil
@@ -49,58 +60,81 @@ class WSClient {
         currentPort = port
         currentToken = token
         helloCompletion = completion
+        isWaitingForHelloAck = false
         
         let urlString = "ws://\(trimmedHost):\(port)"
+        logger.info("WebSocket URL: \(urlString)")
+        
         guard let url = URL(string: urlString) else {
+            logger.error("Invalid WebSocket URL: \(urlString)")
             completion(false, "Invalid WebSocket URL")
             return
         }
         
-        // Disconnect existing connection if any
-        disconnect()
+        // Disconnect existing connection if any (but preserve helloCompletion!)
+        logger.debug("Disconnecting any existing connection...")
+        disconnectInternal(clearCompletion: false)
         
         let session = URLSession(configuration: .default)
         webSocketTask = session.webSocketTask(with: url)
         urlSession = session
         
-        // Start receiving messages first (to catch hello_ack)
+        logger.info("Created URLSession and WebSocketTask")
+        
+        // KEY: Start receiving messages FIRST (before resume) - this was the working pattern
+        logger.info(">>> Setting up receiveMessages() BEFORE resume()")
         receiveMessages()
         
         // Resume the connection
+        logger.info(">>> Calling webSocketTask.resume()...")
         webSocketTask?.resume()
         
-        // Set connection timeout (10 seconds to establish WebSocket connection)
+        // Give the WebSocket a brief moment to establish connection
+        // URLSessionWebSocketTask will queue messages, but a small delay ensures better reliability
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
+            guard let self = self else { return }
+            logger.info(">>> Sending hello after 0.2s delay...")
+            self.sendHello(token: token)
+        }
+        
+        // Set timeout for hello_ack (5 seconds after connection attempt)
+        logger.debug("Setting hello_ack timeout timer: \(helloAckTimeout)s")
+        helloAckTimeoutTimer = Timer.scheduledTimer(withTimeInterval: helloAckTimeout, repeats: false) { [weak self] _ in
+            guard let self = self, self.isWaitingForHelloAck else { return }
+            logger.error(">>> HELLO_ACK TIMEOUT - no response after \(self.helloAckTimeout) seconds")
+            self.isWaitingForHelloAck = false
+            self.helloAckTimeoutTimer = nil
+            self.helloCompletion?(false, "Connection timeout - server may be unreachable or token invalid")
+            self.helloCompletion = nil
+        }
+        
+        // Set connection timeout (10 seconds total)
+        logger.debug("Setting connection timeout timer: \(connectionTimeout)s")
         connectionTimeoutTimer = Timer.scheduledTimer(withTimeInterval: connectionTimeout, repeats: false) { [weak self] _ in
             guard let self = self else { return }
-            // Check if we're still waiting for connection
             if !self.isConnected && self.helloCompletion != nil {
+                logger.error(">>> CONNECTION TIMEOUT - failed after \(self.connectionTimeout) seconds")
                 self.connectionTimeoutTimer = nil
                 self.helloAckTimeoutTimer?.invalidate()
                 self.helloAckTimeoutTimer = nil
                 self.isWaitingForHelloAck = false
-                logger.error("Connection timeout - failed to establish WebSocket connection after \(self.connectionTimeout) seconds")
-                self.helloCompletion?(false, "Connection timeout - unable to reach server. Check network connection and server address.")
+                self.helloCompletion?(false, "Connection timeout - unable to reach server")
                 self.helloCompletion = nil
                 self.disconnect()
             }
         }
-        
-        // Give the WebSocket a brief moment to establish connection
-        // URLSessionWebSocketTask will queue messages, but a small delay ensures better reliability
-        // This is especially important on slower networks
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
-            guard let self = self else { return }
-            // Send hello message - if connection isn't ready, send() will handle it
-            self.sendHello(token: token)
-        }
     }
     
     private func sendHello(token: String) {
+        logger.info("========== SEND HELLO ==========")
+        
         // Token should already be trimmed by PairingView, but trim again for safety
         let trimmedToken = token.trimmingCharacters(in: .whitespacesAndNewlines)
         
+        logger.debug("Token after trim: length=\(trimmedToken.count), masked=\(trimmedToken.maskedForLogging)")
+        
         guard !trimmedToken.isEmpty else {
-            logger.error("Token validation failed - token is empty")
+            logger.error("Token validation failed - token is empty after trimming")
             helloCompletion?(false, "Invalid authentication. Please check your session token.")
             helloCompletion = nil
             connectionTimeoutTimer?.invalidate()
@@ -114,10 +148,9 @@ class WSClient {
             "token": trimmedToken
         ]
         
-        logger.info("Sending hello with token: \(trimmedToken.maskedForLogging) (length: \(trimmedToken.count))")
-        
         guard let jsonData = try? JSONSerialization.data(withJSONObject: helloMessage),
               let jsonString = String(data: jsonData, encoding: .utf8) else {
+            logger.error("Failed to create hello message JSON")
             helloCompletion?(false, "Failed to create hello message")
             helloCompletion = nil
             connectionTimeoutTimer?.invalidate()
@@ -125,12 +158,14 @@ class WSClient {
             return
         }
         
+        logger.info("Sending hello message: \(jsonString.prefix(100))...")
+        
         let message = URLSessionWebSocketTask.Message.string(jsonString)
         webSocketTask?.send(message) { [weak self] error in
             guard let self = self else { return }
             
             if let error = error {
-                logger.error("Error sending hello: \(error.localizedDescription)")
+                logger.error(">>> HELLO SEND FAILED: \(error.localizedDescription)")
                 let errorMsg: String
                 if let urlError = error as? URLError {
                     switch urlError.code {
@@ -155,69 +190,95 @@ class WSClient {
                 self.helloCompletion?(false, errorMsg)
                 self.helloCompletion = nil
             } else {
-                logger.debug("Hello message sent successfully, waiting for hello_ack...")
+                logger.info(">>> HELLO SENT SUCCESSFULLY - waiting for hello_ack...")
                 self.isWaitingForHelloAck = true
-                
-                // Set timeout for hello_ack (5 seconds after hello is sent)
-                self.helloAckTimeoutTimer = Timer.scheduledTimer(withTimeInterval: self.helloAckTimeout, repeats: false) { [weak self] _ in
-                    guard let self = self, self.isWaitingForHelloAck else { return }
-                    self.isWaitingForHelloAck = false
-                    self.helloAckTimeoutTimer = nil
-                    logger.error("Hello_ack timeout - no response after \(self.helloAckTimeout) seconds")
-                    self.helloCompletion?(false, "Server did not respond. Please check your connection and try again.")
-                    self.helloCompletion = nil
-                    self.disconnect()
-                }
             }
         }
     }
     
     private func receiveMessages() {
-        webSocketTask?.receive { [weak self] result in
-            guard let self = self else { return }
+        logger.debug(">>> receiveMessages() called")
+        
+        guard let task = webSocketTask else {
+            logger.error("Cannot receive messages: webSocketTask is nil")
+            return
+        }
+        
+        logger.debug("Setting up receive handler...")
+        
+        task.receive { [weak self] result in
+            guard let self = self else {
+                logger.debug("receiveMessages callback - self is nil")
+                return
+            }
             
             switch result {
             case .success(let message):
                 switch message {
                 case .string(let text):
+                    logger.debug(">>> RECEIVED TEXT MESSAGE: \(text.prefix(200))...")
                     self.handleTextMessage(text)
                 case .data(let data):
+                    logger.debug(">>> RECEIVED BINARY MESSAGE: \(data.count) bytes")
                     self.handleBinaryMessage(data)
                 @unknown default:
-                    logger.debug("Unknown message type")
+                    logger.debug(">>> RECEIVED UNKNOWN MESSAGE TYPE")
                 }
                 
-                // Continue receiving messages
+                // Continue receiving messages (recursive call)
                 self.receiveMessages()
                 
             case .failure(let error):
-                logger.error("Receive error: \(error.localizedDescription)")
-                self.handleDisconnection()
+                logger.error(">>> RECEIVE ERROR: \(error.localizedDescription)")
+                // Only treat as disconnection if we were connected or waiting for connection
+                if self.isConnected || self.helloCompletion != nil {
+                    self.handleDisconnection()
+                }
             }
         }
     }
     
     private func handleTextMessage(_ text: String) {
+        logger.debug("Parsing text message...")
+        
         guard let data = text.data(using: .utf8),
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let type = json["type"] as? String else {
-            logger.debug("Invalid message format")
+            logger.error("Invalid message format - cannot parse JSON or missing 'type' field")
             return
         }
         
+        logger.info(">>> MESSAGE TYPE: \(type)")
+        
         switch type {
         case "hello_ack":
-            logger.info("Received hello_ack - connection established")
+            logger.info("========== HELLO_ACK RECEIVED ==========")
+            logger.info("Connection SUCCESSFUL!")
+            
             isWaitingForHelloAck = false
+            
             // Cancel timers on successful connection
+            logger.debug("Cancelling timers...")
             connectionTimeoutTimer?.invalidate()
             connectionTimeoutTimer = nil
             helloAckTimeoutTimer?.invalidate()
             helloAckTimeoutTimer = nil
+            
+            logger.debug("Updating connection state to true...")
             updateConnectionState(true)
+            
+            logger.debug("Calling onConnectionStateChanged callback...")
             onConnectionStateChanged?(true)
-            helloCompletion?(true, nil)
+            
+            // Call completion on main thread
+            logger.debug("Calling helloCompletion callback...")
+            let completion = helloCompletion
             helloCompletion = nil
+            DispatchQueue.main.async {
+                completion?(true, nil)
+            }
+            
+            logger.info("Connection handshake complete!")
             
         case "control":
             if let action = json["action"] as? String {
@@ -252,7 +313,6 @@ class WSClient {
     }
     
     // Flag to track if a frame send is in progress (backpressure)
-    // This is checked by ScanController before sending - no local backpressure logic here
     private(set) var isSendingFrame = false
     
     // Check if WebSocket can accept a new frame immediately
@@ -261,16 +321,13 @@ class WSClient {
     }
     
     // Send JPEG frame - returns true if frame was accepted, false if dropped due to backpressure
-    // This method is synchronous in terms of acceptance - it immediately returns whether the frame was queued
     @discardableResult
     func sendJPEGFrame(_ data: Data) -> Bool {
         guard isConnected else {
-            // Not connected - frame dropped
             return false
         }
         
         // Backpressure: reject if previous frame is still being sent
-        // ScanController should check canAcceptFrame before calling this
         guard !isSendingFrame else {
             return false
         }
@@ -279,7 +336,6 @@ class WSClient {
         
         let message = URLSessionWebSocketTask.Message.data(data)
         webSocketTask?.send(message) { [weak self] error in
-            // Reset flag on completion (success or error)
             self?.isSendingFrame = false
             
             if let error = error {
@@ -305,6 +361,8 @@ class WSClient {
     }
     
     private func handleDisconnection() {
+        logger.info(">>> handleDisconnection called")
+        
         // Cancel any pending timers
         connectionTimeoutTimer?.invalidate()
         connectionTimeoutTimer = nil
@@ -314,11 +372,17 @@ class WSClient {
         updateConnectionState(false)
         onConnectionStateChanged?(false)
         
-        // No automatic reconnection - user must explicitly reconnect
-        // This gives user control and visibility into connection state
+        // If we have a pending completion, call it with failure
+        if let completion = helloCompletion {
+            logger.debug("Calling pending helloCompletion with failure")
+            helloCompletion = nil
+            DispatchQueue.main.async {
+                completion(false, "Connection lost")
+            }
+        }
     }
     
-    func disconnect() {
+    private func disconnectInternal(clearCompletion: Bool) {
         // Cancel all timers
         connectionTimeoutTimer?.invalidate()
         connectionTimeoutTimer = nil
@@ -327,20 +391,31 @@ class WSClient {
         
         webSocketTask?.cancel(with: .goingAway, reason: nil)
         webSocketTask = nil
+        urlSession?.invalidateAndCancel()
         urlSession = nil
         updateConnectionState(false)
-        onConnectionStateChanged?(false)
         
         // Clear connection info
         currentHost = nil
         currentPort = nil
         currentToken = nil
-        helloCompletion = nil
         isWaitingForHelloAck = false
+        
+        if clearCompletion {
+            helloCompletion = nil
+        }
+    }
+    
+    func disconnect() {
+        logger.info(">>> disconnect() called")
+        disconnectInternal(clearCompletion: true)
+        onConnectionStateChanged?(false)
     }
     
     // Thread-safe method to update connection state
     private func updateConnectionState(_ newState: Bool) {
+        logger.debug("updateConnectionState: \(isConnected) -> \(newState)")
+        
         // Ensure updates happen on main thread for thread safety
         if Thread.isMainThread {
             isConnected = newState

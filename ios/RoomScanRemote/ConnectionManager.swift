@@ -53,9 +53,11 @@ final class ConnectionManager {
     
     private func setupWebSocketCallbacks() {
         // Update connection state when WSClient state changes
+        // Note: This callback is called from WSClient, which already handles main thread dispatch
         wsClient.onConnectionStateChanged = { [weak self] isConnected in
-            Task { @MainActor in
-                guard let self = self else { return }
+            guard let self = self else { return }
+            // Update on main thread (WSClient may call from background)
+            DispatchQueue.main.async {
                 if isConnected {
                     self.connectionState = .connected
                 } else {
@@ -69,7 +71,7 @@ final class ConnectionManager {
         
         // Forward other callbacks and track data received
         wsClient.onControlMessage = { [weak self] action in
-            Task { @MainActor in
+            DispatchQueue.main.async {
                 // Estimate message size (JSON string)
                 let estimatedSize = action.data(using: .utf8)?.count ?? 0
                 self?.recordMessageReceived(size: estimatedSize)
@@ -78,7 +80,7 @@ final class ConnectionManager {
         }
         
         wsClient.onRoomUpdate = { [weak self] data in
-            Task { @MainActor in
+            DispatchQueue.main.async {
                 // Estimate message size (JSON dictionary)
                 if let jsonData = try? JSONSerialization.data(withJSONObject: data) {
                     self?.recordMessageReceived(size: jsonData.count)
@@ -88,7 +90,7 @@ final class ConnectionManager {
         }
         
         wsClient.onInstruction = { [weak self] message in
-            Task { @MainActor in
+            DispatchQueue.main.async {
                 let estimatedSize = message.data(using: .utf8)?.count ?? 0
                 self?.recordMessageReceived(size: estimatedSize)
                 self?.onInstruction?(message)
@@ -96,7 +98,7 @@ final class ConnectionManager {
         }
         
         wsClient.onStatus = { [weak self] message in
-            Task { @MainActor in
+            DispatchQueue.main.async {
                 let estimatedSize = message.data(using: .utf8)?.count ?? 0
                 self?.recordMessageReceived(size: estimatedSize)
                 self?.onStatus?(message)
@@ -105,14 +107,20 @@ final class ConnectionManager {
     }
     
     func connect(laptopHost: String, port: Int = 8080, token: String, completion: @escaping (Bool, String?) -> Void) {
-        // Update state to connecting
-        Task { @MainActor in
-            connectionState = .connecting
+        // Update state to connecting on main thread
+        DispatchQueue.main.async { [weak self] in
+            self?.connectionState = .connecting
         }
         
+        // Call WSClient connect - it will handle main thread dispatch for completion
         wsClient.connect(laptopHost: laptopHost, port: port, token: token) { [weak self] success, error in
-            Task { @MainActor in
-                guard let self = self else { return }
+            // WSClient already calls completion on main thread, but ensure we're on main thread for state updates
+            DispatchQueue.main.async {
+                guard let self = self else {
+                    completion(success, error)
+                    return
+                }
+                
                 if success {
                     self.connectionState = .connected
                     // Reset quality tracking on successful connection
@@ -128,6 +136,8 @@ final class ConnectionManager {
                     let errorMessage = error ?? "Unknown error"
                     self.connectionState = .failed(errorMessage)
                 }
+                
+                // Call the original completion
                 completion(success, error)
             }
         }
@@ -144,8 +154,8 @@ final class ConnectionManager {
     
     func reconnect(laptopHost: String, port: Int = 8080, token: String, completion: @escaping (Bool, String?) -> Void) {
         // Update state to reconnecting
-        Task { @MainActor in
-            connectionState = .reconnecting
+        DispatchQueue.main.async { [weak self] in
+            self?.connectionState = .reconnecting
         }
         connect(laptopHost: laptopHost, port: port, token: token, completion: completion)
     }
@@ -190,10 +200,9 @@ final class ConnectionManager {
     }
     
     func recordMessageReceived(size: Int) {
-        Task { @MainActor in
-            messagesReceived += 1
-            bytesReceived += Int64(size)
-        }
+        // This is already called from main thread via DispatchQueue.main.async in callbacks
+        messagesReceived += 1
+        bytesReceived += Int64(size)
     }
     
     // Update connection quality based on frame send latency
