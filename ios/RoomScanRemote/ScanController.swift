@@ -195,7 +195,7 @@ class ScanController: NSObject, ObservableObject {
             let fileURL = tempDir.appendingPathComponent(fileName)
             
             // Export to USDZ
-            try capturedRoom.export(to: fileURL, exportOptions: .model)
+            try capturedRoom.export(to: fileURL, exportOptions: .mesh)
             
             print("[ScanController] USDZ exported to: \(fileURL.path)")
             
