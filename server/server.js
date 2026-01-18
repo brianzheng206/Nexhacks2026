@@ -22,14 +22,40 @@ if (!fs.existsSync(UPLOADS_DIR)) {
 // Middleware
 app.use(express.json());
 
+// Serve static files from the UI build directory
+const UI_DIST_PATH = path.join(__dirname, 'UI', 'dist');
+
 if (process.env.NODE_ENV === 'development') {
+  // In development, proxy to Vite dev server
   const { createProxyMiddleware } = require('http-proxy-middleware');
   app.use('/', createProxyMiddleware({
     target: 'http://localhost:5173',
     changeOrigin: true,
+    ws: true, // Enable WebSocket proxying for HMR
   }));
 } else {
-  app.use(express.static(path.join(__dirname, 'public', 'dist')));
+  // In production, serve the built UI
+  app.use(express.static(UI_DIST_PATH));
+  
+  // Serve index.html for all non-API routes (SPA routing)
+  app.get('*', (req, res, next) => {
+    // Skip API routes
+    if (req.path.startsWith('/new') || 
+        req.path.startsWith('/upload') || 
+        req.path.startsWith('/download') || 
+        req.path.startsWith('/health') ||
+        req.path.startsWith('/mesh') ||
+        req.path.startsWith('/pair')) {
+      return next();
+    }
+    
+    const indexPath = path.join(UI_DIST_PATH, 'index.html');
+    if (fs.existsSync(indexPath)) {
+      res.sendFile(indexPath);
+    } else {
+      res.status(404).send('UI not built. Run: cd UI && npm run build');
+    }
+  });
 }
 
 // Sessions Map: token -> { phoneWs, uiWsSet, latestUsdzPath }

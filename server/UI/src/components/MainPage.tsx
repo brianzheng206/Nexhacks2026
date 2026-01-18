@@ -169,6 +169,12 @@ export default function MainPage() {
           } else if (d.type === 'mesh_update') {
             // Handle detailed 3D mesh with colors
             if (d.anchorId && d.vertices && d.faces && d.colors) {
+              console.log('[MainPage] Received mesh_update:', {
+                anchorId: d.anchorId,
+                vertexCount: d.vertices?.length || 0,
+                faceCount: d.faces?.length || 0,
+                colorCount: d.colors?.length || 0
+              });
               setMeshData(prev => {
                 const updated = new Map(prev);
                 updated.set(d.anchorId, {
@@ -181,6 +187,8 @@ export default function MainPage() {
                 return updated;
               });
               setIsScanning(true);
+            } else {
+              console.warn('[MainPage] Invalid mesh_update message:', d);
             }
           } else if (d.type === 'status') {
             setPhoneConnected(d.value === 'phone_connected');
@@ -323,25 +331,27 @@ export default function MainPage() {
 
       <div className="flex flex-1 overflow-hidden">
         <div className="flex-1 p-4">
-          <div className="glass-card-strong rounded-2xl w-full h-full overflow-hidden relative">
+          <div className="glass-card-strong rounded-2xl w-full h-full overflow-hidden relative" style={{ minHeight: '400px' }}>
             {/* 3D Mesh Viewer - shows detailed colored mesh */}
-            {meshData.size > 0 ? (
-              <Mesh3DViewer meshData={meshData} className="w-full h-full" />
-            ) : (
-              <div className="absolute inset-0 flex items-center justify-center bg-black/50">
-                {previewImageSrc && <img ref={previewImageRef} src={previewImageSrc} alt="" className="max-w-full max-h-full object-contain" />}
-                <canvas ref={floorplanCanvasRef} className="w-full h-full" />
-                {!previewImageSrc && !floorplanData.length && (
-                  <div className="text-center">
-                    <div className="w-16 h-16 rounded-2xl bg-white/5 flex items-center justify-center mx-auto mb-4">
-                      <Scan className="w-8 h-8 text-white/20" strokeWidth={1.5} />
+            <div className="absolute inset-0 w-full h-full">
+              {meshData.size > 0 ? (
+                <Mesh3DViewer meshData={meshData} className="w-full h-full" />
+              ) : (
+                <div className="w-full h-full flex items-center justify-center bg-black/50">
+                  {previewImageSrc && <img ref={previewImageRef} src={previewImageSrc} alt="" className="max-w-full max-h-full object-contain" />}
+                  <canvas ref={floorplanCanvasRef} className="w-full h-full" />
+                  {!previewImageSrc && !floorplanData.length && (
+                    <div className="text-center absolute">
+                      <div className="w-16 h-16 rounded-2xl bg-white/5 flex items-center justify-center mx-auto mb-4">
+                        <Scan className="w-8 h-8 text-white/20" strokeWidth={1.5} />
+                      </div>
+                      <p className="text-white/30">Awaiting scan</p>
+                      <p className="text-white/15 text-sm mt-1">Connect device to begin</p>
                     </div>
-                    <p className="text-white/30">Awaiting scan</p>
-                    <p className="text-white/15 text-sm mt-1">Connect device to begin</p>
-                  </div>
-                )}
-              </div>
-            )}
+                  )}
+                </div>
+              )}
+            </div>
             {isScanning && (
               <div className="absolute top-4 left-4 badge badge-info status-pulse z-10">
                 <Activity className="w-3 h-3" />
