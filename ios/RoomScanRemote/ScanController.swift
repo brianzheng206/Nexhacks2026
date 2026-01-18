@@ -399,6 +399,30 @@ class ScanController: NSObject, ObservableObject {
             wsClient.sendMessage(jsonString)
         }
     }
+    
+    /// Send a pre-serialized message (already a dictionary) - used when serialization happens on delegate thread
+    private func sendMessageDirect(_ message: [String: Any]) {
+        guard let jsonData = try? JSONSerialization.data(withJSONObject: message),
+              let jsonString = String(data: jsonData, encoding: .utf8) else {
+            logger.error("Failed to serialize message")
+            return
+        }
+        
+        if let connectionManager = connectionManager {
+            guard connectionManager.isConnected else {
+                logger.debug("Cannot send message: not connected")
+                return
+            }
+            connectionManager.sendMessage(jsonString)
+        } else {
+            let wsClient = WSClient.shared
+            guard wsClient.isConnected else {
+                logger.debug("Cannot send message: not connected")
+                return
+            }
+            wsClient.sendMessage(jsonString)
+        }
+    }
 
     private func serializeSurface(_ surface: CapturedRoom.Surface) -> [String: Any] {
         return [
@@ -471,7 +495,13 @@ class ScanController: NSObject, ObservableObject {
     }
     
     func uploadUSDZ(fileURL: URL, host: String, port: Int, token: String) {
-        let uploadURL = URL(string: "http://\(host):\(port)/upload/usdz?token=\(token)")!
+        // Safely construct URL - avoid force unwrap
+        guard let uploadURL = URL(string: "http://\(host):\(port)/upload/usdz?token=\(token)") else {
+            logger.error("Failed to construct upload URL for host: \(host), port: \(port)")
+            updateStateOnMain(errorMessage: "Invalid upload URL")
+            try? FileManager.default.removeItem(at: fileURL)
+            return
+        }
         
         var request = URLRequest(url: uploadURL)
         request.httpMethod = "POST"
@@ -537,22 +567,63 @@ class ScanController: NSObject, ObservableObject {
 
 extension ScanController: RoomCaptureSessionDelegate {
     func captureSession(_ session: RoomCaptureSession, didProvide instruction: RoomCaptureSession.Instruction) {
+        // Capture instruction text on current thread before dispatching
         let instructionText = String(describing: instruction)
         logger.debug("Instruction: \(instructionText)")
-        DispatchQueue.main.async {
+        
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            // Only send if still scanning
+            guard self.isScanning else { return }
             self.sendInstruction(instructionText)
         }
     }
     
     func captureSession(_ session: RoomCaptureSession, didUpdate capturedRoom: CapturedRoom) {
-        DispatchQueue.main.async {
-            self.sendRoomUpdate(capturedRoom: capturedRoom)
+        // Only process if still scanning
+        guard isScanning else { return }
+        
+        // Serialize room data on current thread before dispatching to avoid accessing capturedRoom on wrong thread
+        let currentTime = Date().timeIntervalSince1970
+        guard currentTime - lastUpdateTime >= updateInterval else { return }
+        
+        guard let token = token else { return }
+        
+        // Serialize immediately on callback thread
+        let stats: [String: Int] = [
+            "walls": capturedRoom.walls.count,
+            "doors": capturedRoom.doors.count,
+            "windows": capturedRoom.windows.count,
+            "objects": capturedRoom.objects.count
+        ]
+        
+        let walls = capturedRoom.walls.map { serializeSurface($0) }
+        let doors = capturedRoom.doors.map { serializeSurface($0) }
+        let windows = capturedRoom.windows.map { serializeSurface($0) }
+        let objects = capturedRoom.objects.map { serializeObject($0) }
+        
+        lastUpdateTime = currentTime
+        
+        let message: [String: Any] = [
+            "type": "room_update",
+            "stats": stats,
+            "walls": walls,
+            "doors": doors,
+            "windows": windows,
+            "objects": objects,
+            "t": Int(currentTime),
+            "token": token
+        ]
+        
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            self.sendMessageDirect(message)
         }
     }
     
     func captureSession(_ session: RoomCaptureSession, didEndWith capturedRoomData: CapturedRoomData, error: Error?) {
         if let error = error {
-                logger.error("Scan ended with error: \(error.localizedDescription)")
+            logger.error("Scan ended with error: \(error.localizedDescription)")
             updateStateOnMain(
                 isScanning: false,
                 errorMessage: "Scan error: \(error.localizedDescription)",
@@ -561,7 +632,10 @@ extension ScanController: RoomCaptureSessionDelegate {
         } else {
             logger.info("Scan completed successfully")
             updateStateOnMain(isScanning: false, roomCaptureSession: nil)
-            Task {
+            
+            // Use Task with weak self to prevent retain cycle
+            Task { [weak self] in
+                guard let self = self else { return }
                 await self.exportUSDZ(from: capturedRoomData)
             }
         }
@@ -575,6 +649,7 @@ extension ScanController: ARSessionDelegate {
         // Only process frames when actively scanning to reduce CPU/memory usage
         guard isScanning else { return }
         
+        // Capture connection state safely
         let isConnected: Bool
         let canAcceptFrame: Bool
         if let connectionManager = connectionManager {
@@ -618,20 +693,32 @@ extension ScanController: ARSessionDelegate {
         frameTimestamps.append(Date())
         updateFPS()
         
+        // Capture pixel buffer data - the buffer might be reused by ARKit
         let pixelBuffer = frame.capturedImage
         let cameraTransform = frame.camera.transform
         
+        // Retain the pixel buffer for the async operation
+        CVPixelBufferRetain(pixelBuffer)
+        
         frameProcessingQueue.async { [weak self] in
+            // Release the pixel buffer when done
+            defer {
+                CVPixelBufferRelease(pixelBuffer)
+            }
+            
             guard let self = self else { return }
             
             defer {
                 self.isProcessingFrame = false
             }
             
+            // Check if still scanning before processing
+            guard self.isScanning else { return }
+            
             guard let jpegData = self.convertPixelBufferToJPEG(pixelBuffer, cameraTransform: cameraTransform) else {
-                DispatchQueue.main.async {
-                    self.totalFramesDropped += 1
-                    self.logStatisticsIfNeeded()
+                DispatchQueue.main.async { [weak self] in
+                    self?.totalFramesDropped += 1
+                    self?.logStatisticsIfNeeded()
                 }
                 return
             }
@@ -644,14 +731,14 @@ extension ScanController: ARSessionDelegate {
             }
             
             if !accepted {
-                DispatchQueue.main.async {
-                    self.totalFramesDropped += 1
+                DispatchQueue.main.async { [weak self] in
+                    self?.totalFramesDropped += 1
                     frameLogger.debug("Warning: Frame rejected by WebSocket despite canAcceptFrame check")
                 }
             }
             
-            DispatchQueue.main.async {
-                self.logStatisticsIfNeeded()
+            DispatchQueue.main.async { [weak self] in
+                self?.logStatisticsIfNeeded()
             }
         }
     }
@@ -680,27 +767,50 @@ extension ScanController: ARSessionDelegate {
         
         lastMeshUpdateTime = currentTime
         
+        // Limit number of mesh anchors processed per update to prevent memory pressure
+        let maxAnchorsPerUpdate = 5
+        let anchorsToProcess = Array(meshAnchors.prefix(maxAnchorsPerUpdate))
+        
         // Process mesh anchors on background queue
         meshProcessingQueue.async { [weak self] in
             guard let self = self else { return }
             
-            for meshAnchor in meshAnchors {
+            // Check if still scanning before processing
+            guard self.isScanning else { return }
+            
+            for meshAnchor in anchorsToProcess {
+                // Check if still scanning before each anchor
+                guard self.isScanning else { break }
                 self.processMeshAnchor(meshAnchor)
             }
         }
     }
     
     private func processMeshAnchor(_ meshAnchor: ARMeshAnchor) {
+        // Check if still scanning before processing
+        guard isScanning else { return }
+        
         // Wrap in autoreleasepool to ensure proper memory management of Metal buffers
         autoreleasepool {
             let geometry = meshAnchor.geometry
+            
+            // Capture anchor data immediately to avoid issues if anchor is modified
+            let anchorIdentifier = meshAnchor.identifier
+            let anchorTransform = meshAnchor.transform
             
             let vertices2D = extractVertices2D(from: geometry.vertices)
             let vertexCount = vertices2D.count
             
             // Skip empty meshes
             guard vertexCount > 0 else {
-                logger.debug("Skipping empty mesh anchor: \(meshAnchor.identifier)")
+                logger.debug("Skipping empty mesh anchor: \(anchorIdentifier)")
+                return
+            }
+            
+            // Limit mesh size to prevent memory issues
+            let maxVertices = 50000
+            guard vertexCount <= maxVertices else {
+                logger.debug("Skipping oversized mesh: \(vertexCount) vertices (max: \(maxVertices))")
                 return
             }
             
@@ -708,7 +818,7 @@ extension ScanController: ARSessionDelegate {
             
             // Skip if no faces
             guard !faces2D.isEmpty else {
-                logger.debug("Skipping mesh with no faces: \(meshAnchor.identifier)")
+                logger.debug("Skipping mesh with no faces: \(anchorIdentifier)")
                 return
             }
             
@@ -723,10 +833,13 @@ extension ScanController: ARSessionDelegate {
                 faceClassifications: faceClassifications
             )
             
+            // Check if still scanning before sending
+            guard isScanning else { return }
+            
             // Send mesh data in server-expected format
             sendMeshUpdate(
-                identifier: meshAnchor.identifier,
-                transform: meshAnchor.transform,
+                identifier: anchorIdentifier,
+                transform: anchorTransform,
                 vertices: vertices2D,
                 faces: faces2D,
                 colors: colors2D
@@ -736,7 +849,7 @@ extension ScanController: ARSessionDelegate {
                 guard let self = self else { return }
                 self.totalMeshesSent += 1
                 self.totalVerticesSent += vertexCount
-                self.sentMeshIdentifiers.insert(meshAnchor.identifier)
+                self.sentMeshIdentifiers.insert(anchorIdentifier)
             }
         }
     }
@@ -785,6 +898,19 @@ extension ScanController: ARSessionDelegate {
         let offset = source.offset
         let componentsPerVector = source.componentsPerVector
         
+        // Safety check for valid buffer
+        guard count > 0, stride > 0, componentsPerVector > 0 else {
+            logger.debug("Invalid vertex source: count=\(count), stride=\(stride), components=\(componentsPerVector)")
+            return []
+        }
+        
+        // Validate buffer size
+        let requiredSize = offset + (count * stride)
+        guard buffer.length >= requiredSize else {
+            logger.error("Buffer too small for vertex extraction: need \(requiredSize), have \(buffer.length)")
+            return []
+        }
+        
         var result: [[Float]] = []
         result.reserveCapacity(count)
         
@@ -797,7 +923,12 @@ extension ScanController: ARSessionDelegate {
             
             for j in 0..<componentsPerVector {
                 let value = vertexPointer.advanced(by: j * MemoryLayout<Float>.size).assumingMemoryBound(to: Float.self).pointee
-                vertex.append(value)
+                // Check for NaN or infinite values
+                if value.isNaN || value.isInfinite {
+                    vertex.append(0.0)
+                } else {
+                    vertex.append(value)
+                }
             }
             result.append(vertex)
         }
@@ -810,6 +941,19 @@ extension ScanController: ARSessionDelegate {
         let count = element.count
         let indexCountPerPrimitive = element.indexCountPerPrimitive
         let bytesPerIndex = element.bytesPerIndex
+        
+        // Safety checks
+        guard count > 0, indexCountPerPrimitive > 0, bytesPerIndex > 0 else {
+            logger.debug("Invalid face element: count=\(count), indices=\(indexCountPerPrimitive), bytes=\(bytesPerIndex)")
+            return []
+        }
+        
+        // Validate buffer size
+        let requiredSize = count * indexCountPerPrimitive * bytesPerIndex
+        guard buffer.length >= requiredSize else {
+            logger.error("Buffer too small for face extraction: need \(requiredSize), have \(buffer.length)")
+            return []
+        }
         
         var result: [[Int]] = []
         result.reserveCapacity(count)
@@ -830,6 +974,9 @@ extension ScanController: ARSessionDelegate {
                 } else if bytesPerIndex == 2 {
                     let value = indexPointer.assumingMemoryBound(to: UInt16.self).pointee
                     face.append(Int(value))
+                } else {
+                    // Unknown bytes per index - skip
+                    logger.debug("Unknown bytesPerIndex: \(bytesPerIndex)")
                 }
             }
             result.append(face)
@@ -844,6 +991,19 @@ extension ScanController: ARSessionDelegate {
         let count = source.count
         let stride = source.stride
         let offset = source.offset
+        
+        // Safety checks
+        guard count > 0, stride > 0 else {
+            logger.debug("Invalid classification source: count=\(count), stride=\(stride)")
+            return []
+        }
+        
+        // Validate buffer size
+        let requiredSize = offset + (count * stride)
+        guard buffer.length >= requiredSize else {
+            logger.error("Buffer too small for classification extraction: need \(requiredSize), have \(buffer.length)")
+            return []
+        }
         
         var result: [Int] = []
         result.reserveCapacity(count)
