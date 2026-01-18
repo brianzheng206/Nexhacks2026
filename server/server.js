@@ -6,6 +6,7 @@ const path = require('path');
 const fs = require('fs');
 const QRCode = require('qrcode');
 const os = require('os');
+const dgram = require('dgram');
 
 const app = express();
 const server = http.createServer(app);
@@ -298,25 +299,72 @@ const upload = multer({
 
 // HTTP Routes
 
-// Helper: Get local IP address
-function getLocalIP() {
+// Helper: Get all local IPv4 addresses
+function getAllLocalIPs() {
   const interfaces = os.networkInterfaces();
+  const ips = [];
   for (const name of Object.keys(interfaces)) {
     for (const iface of interfaces[name]) {
-      // Skip internal (loopback) and non-IPv4 addresses
       if (iface.family === 'IPv4' && !iface.internal) {
-        return iface.address;
+        ips.push(iface.address);
       }
     }
   }
-  return 'localhost';
+  return ips;
+}
+
+// Helper: Get local IP address (best effort)
+function getLocalIP() {
+  const ips = getAllLocalIPs();
+  return ips[0] || 'localhost';
+}
+
+function getRequestHost(req) {
+  const host = (req.hostname || '').trim();
+  if (!host || host === 'localhost' || host === '127.0.0.1') {
+    return null;
+  }
+  return host;
+}
+
+function getDefaultRouteIP(timeoutMs = 200) {
+  return new Promise((resolve) => {
+    const socket = dgram.createSocket('udp4');
+    let settled = false;
+
+    const finish = (ip) => {
+      if (settled) return;
+      settled = true;
+      try {
+        socket.close();
+      } catch {}
+      resolve(ip || null);
+    };
+
+    const timer = setTimeout(() => finish(null), timeoutMs);
+
+    socket.on('error', () => {
+      clearTimeout(timer);
+      finish(null);
+    });
+
+    socket.connect(80, '8.8.8.8', () => {
+      clearTimeout(timer);
+      const address = socket.address();
+      finish(address && address.address ? address.address : null);
+    });
+  });
 }
 
 // GET /new - Generate new session token
 app.get('/new', async (req, res) => {
   try {
-    const token = generateToken();
-    const localIP = getLocalIP();
+    const requestedToken = typeof req.query.token === 'string' ? req.query.token.trim() : '';
+    const token = requestedToken || generateToken();
+    const requestHost = getRequestHost(req);
+    const routeIP = await getDefaultRouteIP();
+    const localIP = requestHost || routeIP || getLocalIP();
+    const availableIPs = Array.from(new Set(getAllLocalIPs()));
     const url = `http://${localIP}:${PORT}/download/${token}/room.usdz`;
     
     // Create pairing URL with token and host
@@ -335,6 +383,7 @@ app.get('/new', async (req, res) => {
       url,
       qrDataUrl,
       laptopIP: localIP,
+      availableIPs,
       pairingUrl: pairingUrl
     });
   } catch (error) {

@@ -1,18 +1,20 @@
 import { useState, useEffect } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import {
   Terminal,
   CheckCircle,
   AlertCircle,
   Info,
   Download,
-  Home,
+  ArrowLeft,
   Copy,
   Check,
   Box,
 } from 'lucide-react';
 
 export default function NewSessionPage() {
+  const [searchParams] = useSearchParams();
+  const existingToken = searchParams.get('token');
   const [token, setToken] = useState<string | null>(null);
   const [qrDataUrl, setQrDataUrl] = useState<string | null>(null);
   const [status, setStatus] = useState<{ message: string; type: 'info' | 'success' | 'error' } | null>(null);
@@ -21,14 +23,15 @@ export default function NewSessionPage() {
   const navigate = useNavigate();
 
   useEffect(() => {
-    fetch('/new')
+    const query = existingToken ? `?token=${encodeURIComponent(existingToken)}` : '';
+    fetch(`/new${query}`)
       .then(res => res.json())
       .then(data => {
         setToken(data.token);
         setQrDataUrl(data.qrDataUrl);
       })
       .catch(() => setStatus({ message: 'Failed to create session.', type: 'error' }));
-  }, []);
+  }, [existingToken]);
 
   const checkUpload = async () => {
     if (!token) return setStatus({ message: 'No token', type: 'error' });
@@ -52,6 +55,10 @@ export default function NewSessionPage() {
       setCopied(true);
       setTimeout(() => setCopied(false), 2000);
     }
+  };
+
+  const handleBack = () => {
+    navigate('/');
   };
 
   const steps = [
@@ -156,9 +163,9 @@ export default function NewSessionPage() {
         )}
 
         <div className="text-center mt-8">
-          <button onClick={() => navigate('/')} className="btn btn-ghost">
-            <Home className="w-4 h-4" />
-            Home
+          <button onClick={handleBack} className="btn btn-ghost">
+            <ArrowLeft className="w-4 h-4" />
+            Back
           </button>
         </div>
       </div>

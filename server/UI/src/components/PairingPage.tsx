@@ -1,8 +1,10 @@
 import { useState, useEffect } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import { ArrowLeft, Copy, Check, Wifi, Server, Key, AlertCircle, Smartphone } from 'lucide-react';
 
 export default function PairingPage() {
+  const [searchParams] = useSearchParams();
+  const existingToken = searchParams.get('token');
   const [qrDataUrl, setQrDataUrl] = useState<string | null>(null);
   const [token, setToken] = useState<string | null>(null);
   const [laptopIP, setLaptopIP] = useState('Loading...');
@@ -12,7 +14,8 @@ export default function PairingPage() {
   const navigate = useNavigate();
 
   useEffect(() => {
-    fetch('/new')
+    const query = existingToken ? `?token=${encodeURIComponent(existingToken)}` : '';
+    fetch(`/new${query}`)
       .then(res => {
         if (!res.ok) throw new Error('Failed');
         return res.json();
@@ -25,7 +28,11 @@ export default function PairingPage() {
         setLaptopIP(host === 'localhost' || host === '127.0.0.1' ? url.hostname : host);
       })
       .catch(e => setError(e.message));
-  }, []);
+  }, [existingToken]);
+
+  const handleBack = () => {
+    navigate('/');
+  };
 
   const copy = async (text: string, type: 'token' | 'ip') => {
     await navigator.clipboard.writeText(text);
@@ -139,7 +146,7 @@ export default function PairingPage() {
 
         {/* Back */}
         <div className="text-center mt-8">
-          <button onClick={() => navigate('/')} className="btn btn-secondary">
+          <button onClick={handleBack} className="btn btn-secondary">
             <ArrowLeft className="w-4 h-4" />
             Back
           </button>

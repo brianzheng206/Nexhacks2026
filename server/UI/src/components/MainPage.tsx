@@ -1,10 +1,11 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { useSearchParams, useNavigate } from 'react-router-dom';
 import {
-  Play, Square, Download, Wifi, WifiOff, Plus, Activity,
+  ArrowLeft, Play, Square, Download, Wifi, WifiOff, Plus, Activity,
   Box, Scan, Layers, Sparkles,
 } from 'lucide-react';
 import Mesh3DViewer from './Mesh3DViewer';
+import RoomPlanViewer from './RoomPlanViewer';
 
 const MAX_RECONNECT_ATTEMPTS = 10;
 const RECONNECT_DELAY = 3000;
@@ -44,6 +45,12 @@ export default function MainPage() {
   const [roomStats, setRoomStats] = useState<any>(null);
   const [meshData, setMeshData] = useState<Map<string, any>>(new Map()); // Store mesh anchors by ID
   const [laptopIP, setLaptopIP] = useState<string | null>(null);
+  const [availableIPs, setAvailableIPs] = useState<string[]>([]);
+  const copyText = (text: string) => navigator.clipboard.writeText(text);
+  const ipCandidates = [laptopIP, ...availableIPs].filter(Boolean) as string[];
+  const uniqueIPs = Array.from(new Set(ipCandidates.filter(ip => ip !== 'localhost' && ip !== '127.0.0.1')));
+  const primaryIP = uniqueIPs[0] || window.location.hostname;
+  const isLoopback = primaryIP === 'localhost' || primaryIP === '127.0.0.1';
 
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectAttemptsRef = useRef(0);
@@ -161,6 +168,13 @@ export default function MainPage() {
                 // Also keep original for JSON display
                 ...d.stats
               });
+            } else if (Array.isArray(d.walls)) {
+              setRoomStats({
+                wallCount: d.walls.length,
+                doorCount: Array.isArray(d.doors) ? d.doors.length : 0,
+                windowCount: Array.isArray(d.windows) ? d.windows.length : 0,
+                objectCount: Array.isArray(d.objects) ? d.objects.length : 0,
+              });
             }
             // Update floorplan with walls data (real-time 3D visualization)
             if (d.walls?.length) {
@@ -188,6 +202,13 @@ export default function MainPage() {
                 return updated;
               });
               setIsScanning(true);
+              setLogContent(JSON.stringify({
+                type: d.type,
+                anchorId: d.anchorId,
+                vertexCount: d.vertices?.length || 0,
+                faceCount: d.faces?.length || 0,
+                colorCount: d.colors?.length || 0
+              }, null, 2));
             } else {
               console.warn('[MainPage] Invalid mesh_update message:', d);
             }
@@ -196,9 +217,11 @@ export default function MainPage() {
             if (d.value === 'phone_disconnected') {
               setIsScanning(false);
             }
+            setLogContent(JSON.stringify(d, null, 2));
           } else if (d.type === 'export_ready') {
             setDownloadUrl(d.downloadUrl);
             setIsScanning(false);
+            setLogContent(JSON.stringify(d, null, 2));
           }
         } catch {}
       }
@@ -219,8 +242,10 @@ export default function MainPage() {
       connectWebSocket();
       // Fetch laptop IP if not already set
       if (!laptopIP) {
-        fetch('/new').then(r => r.json()).then(d => {
+        const query = token ? `?token=${encodeURIComponent(token)}` : '';
+        fetch(`/new${query}`).then(r => r.json()).then(d => {
           if (d.laptopIP) setLaptopIP(d.laptopIP);
+          if (Array.isArray(d.availableIPs)) setAvailableIPs(d.availableIPs);
         }).catch(() => {});
       }
     }
@@ -238,8 +263,33 @@ export default function MainPage() {
       const d = await res.json();
       setToken(d.token);
       setLaptopIP(d.laptopIP);
+      if (Array.isArray(d.availableIPs)) setAvailableIPs(d.availableIPs);
       navigate(`/?token=${d.token}`);
     } catch {}
+  };
+
+  const handleBack = () => {
+    if (previewImageSrc) {
+      URL.revokeObjectURL(previewImageSrc);
+    }
+    wsRef.current?.close();
+    if (reconnectTimeoutRef.current) clearTimeout(reconnectTimeoutRef.current);
+    wsRef.current = null;
+    reconnectTimeoutRef.current = null;
+    reconnectAttemptsRef.current = 0;
+    setIsConnected(false);
+    setPhoneConnected(false);
+    setLogContent('Waiting for data...');
+    setPreviewImageSrc(null);
+    setDownloadUrl(null);
+    setFloorplanData([]);
+    setIsScanning(false);
+    setRoomStats(null);
+    setMeshData(new Map());
+    setLaptopIP(null);
+    setAvailableIPs([]);
+    setToken(null);
+    navigate('/');
   };
 
   const sendControl = (action: 'start' | 'stop') => {
@@ -316,6 +366,10 @@ export default function MainPage() {
     <div className="flex flex-col h-screen w-screen bg-black text-white">
       <header className="glass border-b border-white/10 px-6 py-4 flex justify-between items-center">
         <div className="flex items-center gap-3">
+          <button onClick={handleBack} className="btn btn-ghost px-3 py-2 text-xs">
+            <ArrowLeft className="w-4 h-4" />
+            Back
+          </button>
           <div className="w-9 h-9 rounded-xl bg-gradient-to-b from-white/15 to-white/5 border border-white/10 flex items-center justify-center">
             <Box className="w-4 h-4 text-white/80" strokeWidth={1.5} />
           </div>
@@ -344,13 +398,14 @@ export default function MainPage() {
       </header>
 
       <div className="flex flex-1 overflow-hidden">
-        <div className="flex-1 p-4">
-          <div className="glass-card-strong rounded-2xl w-full h-full overflow-hidden relative" style={{ minHeight: '400px' }}>
-            {/* 3D Mesh Viewer - shows detailed colored mesh */}
-            <div className="absolute inset-0 w-full h-full">
-              {meshData.size > 0 ? (
-                <Mesh3DViewer meshData={meshData} className="w-full h-full" />
-              ) : (
+        <div className="flex-1 p-4 overflow-y-auto">
+          <div className="grid gap-4 h-full grid-cols-1 xl:grid-cols-2">
+            <div className="glass-card-strong rounded-2xl w-full h-full overflow-hidden relative" style={{ minHeight: '400px' }}>
+              <div className="absolute top-4 left-4 badge badge-info z-10">
+                <Activity className="w-3 h-3" />
+                Live Preview
+              </div>
+              <div className="absolute inset-0 w-full h-full">
                 <div className="w-full h-full flex items-center justify-center bg-black/50">
                   {previewImageSrc && <img ref={previewImageRef} src={previewImageSrc} alt="" className="max-w-full max-h-full object-contain" />}
                   <canvas ref={floorplanCanvasRef} className="w-full h-full" />
@@ -364,14 +419,37 @@ export default function MainPage() {
                     </div>
                   )}
                 </div>
+              </div>
+              {isScanning && (
+                <div className="absolute bottom-4 left-4 badge badge-info status-pulse z-10">
+                  Scanning
+                </div>
               )}
             </div>
-            {isScanning && (
-              <div className="absolute top-4 left-4 badge badge-info status-pulse z-10">
-                <Activity className="w-3 h-3" />
-                Scanning
+
+            <div className="glass-card-strong rounded-2xl w-full h-full overflow-hidden relative" style={{ minHeight: '400px' }}>
+              <div className="absolute top-4 left-4 badge badge-info z-10">
+                <Layers className="w-3 h-3" />
+                3D Reconstruction
               </div>
-            )}
+              <div className="absolute inset-0 w-full h-full">
+                {meshData.size > 0 ? (
+                  <Mesh3DViewer meshData={meshData} className="w-full h-full" />
+                ) : floorplanData.length > 0 ? (
+                  <RoomPlanViewer walls={floorplanData} className="w-full h-full" />
+                ) : (
+                  <div className="w-full h-full flex items-center justify-center bg-black/50">
+                    <div className="text-center">
+                      <div className="w-16 h-16 rounded-2xl bg-white/5 flex items-center justify-center mx-auto mb-4">
+                        <Box className="w-8 h-8 text-white/20" strokeWidth={1.5} />
+                      </div>
+                      <p className="text-white/30">Waiting for 3D data</p>
+                      <p className="text-white/15 text-sm mt-1">Start scanning to stream 3D</p>
+                    </div>
+                  </div>
+                )}
+              </div>
+            </div>
           </div>
         </div>
 
@@ -386,14 +464,45 @@ export default function MainPage() {
                 <Square className="w-4 h-4" /> Stop
               </button>
             </div>
+            <button onClick={() => navigate(`/pair?token=${token}`)} className="btn btn-secondary w-full mt-3 py-2">
+              <Scan className="w-4 h-4" />
+              QR Setup
+            </button>
+            <button onClick={handleBack} className="btn btn-ghost w-full mt-3 py-2">
+              <ArrowLeft className="w-4 h-4" />
+              Home
+            </button>
             {!phoneConnected && isConnected && (
               <div className="mt-3 p-3 rounded-lg bg-amber-500/10 border border-amber-500/20">
                 <p className="text-xs text-amber-400/80 font-medium mb-2">📱 Connect Your Device</p>
                 <div className="space-y-2 text-[10px] text-amber-400/70">
                   <div className="flex gap-2">
                     <span className="text-amber-400/50">IP:</span>
-                    <span className="font-mono bg-black/30 px-1 rounded">{laptopIP || window.location.hostname}</span>
+                    <span className="font-mono bg-black/30 px-1 rounded">{primaryIP}</span>
+                    <button
+                      onClick={() => copyText(primaryIP)}
+                      className="text-amber-300/70 hover:text-amber-200 transition-colors"
+                    >
+                      Copy
+                    </button>
                   </div>
+                  {uniqueIPs.length > 1 && (
+                    <div className="space-y-1">
+                      <p className="text-[9px] text-amber-400/40 uppercase">Other IPs</p>
+                      {uniqueIPs.slice(1, 4).map(ip => (
+                        <div key={ip} className="flex gap-2 items-center">
+                          <span className="text-amber-400/50">IP:</span>
+                          <span className="font-mono bg-black/30 px-1 rounded">{ip}</span>
+                          <button
+                            onClick={() => copyText(ip)}
+                            className="text-amber-300/70 hover:text-amber-200 transition-colors"
+                          >
+                            Copy
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  )}
                   <div className="flex gap-2">
                     <span className="text-amber-400/50">Token:</span>
                     <span className="font-mono bg-black/30 px-1 rounded break-all">{token}</span>
@@ -402,6 +511,11 @@ export default function MainPage() {
                 <p className="text-[9px] text-amber-400/40 mt-2">
                   Enter these on your iOS app to connect
                 </p>
+                {isLoopback && uniqueIPs.length === 0 && (
+                  <p className="text-[9px] text-amber-400/40 mt-1">
+                    Tip: open this page via your laptop's LAN IP to generate a reachable QR.
+                  </p>
+                )}
               </div>
             )}
           </div>

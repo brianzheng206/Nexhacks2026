@@ -4,7 +4,11 @@
   "description": "RoomScan Remote server - receives RoomPlan scans from iOS and serves web UI",
   "main": "server.js",
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "dev": "NODE_ENV=development node --no-deprecation server.js",
+    "dev:ui": "cd UI && npm run dev",
+    "build:ui": "cd UI && npm run build",
+    "build:ui:watch": "cd UI && npm run build -- --watch"
   },
   "keywords": [
     "roomplan",
