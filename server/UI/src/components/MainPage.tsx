@@ -252,9 +252,8 @@ export default function MainPage() {
     return () => {
       if (reconnectTimeoutRef.current) clearTimeout(reconnectTimeoutRef.current);
       wsRef.current?.close();
-      if (previewImageSrc) URL.revokeObjectURL(previewImageSrc);
     };
-  }, [token, connectWebSocket, previewImageSrc, laptopIP]);
+  }, [token, connectWebSocket, laptopIP]);
 
   const createSession = async () => {
     try {
