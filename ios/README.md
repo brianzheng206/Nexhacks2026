@@ -64,7 +64,6 @@ RoomScanRemote/
 6. Use Start/Stop buttons or wait for server control commands
 
 ## Next Steps
-
 - Implement RoomPlan scanning in `ScanController`
 - Add camera preview (optional)
 - Implement USDZ export and upload

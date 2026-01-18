@@ -6,6 +6,7 @@ const path = require('path');
 const fs = require('fs');
 const QRCode = require('qrcode');
 const os = require('os');
+const dgram = require('dgram');
 
 const app = express();
 const server = http.createServer(app);
@@ -25,7 +26,43 @@ if (!fs.existsSync(UPLOADS_DIR)) {
 
 // Middleware
 app.use(express.json());
-app.use(express.static('public'));
+
+// Serve static files from the UI build directory
+const UI_DIST_PATH = path.join(__dirname, 'UI', 'dist');
+
+if (process.env.NODE_ENV === 'development') {
+  // In development, proxy to Vite dev server
+  const { createProxyMiddleware } = require('http-proxy-middleware');
+  app.use('/', createProxyMiddleware({
+    target: 'http://localhost:5173',
+    changeOrigin: true,
+    ws: true, // Enable WebSocket proxying for HMR
+  }));
+} else {
+  // In production, serve the built UI
+  app.use(express.static(UI_DIST_PATH));
+  
+  // Serve index.html for all non-API routes (SPA routing)
+  app.get('*', (req, res, next) => {
+    // Skip API routes
+    if (req.path.startsWith('/new') || 
+        req.path.startsWith('/upload') || 
+        req.path.startsWith('/download') || 
+        req.path.startsWith('/health') ||
+        req.path.startsWith('/mesh') ||
+        req.path.startsWith('/pair') ||
+        req.path.startsWith('/debug')) {
+      return next();
+    }
+    
+    const indexPath = path.join(UI_DIST_PATH, 'index.html');
+    if (fs.existsSync(indexPath)) {
+      res.sendFile(indexPath);
+    } else {
+      res.status(404).send('UI not built. Run: cd UI && npm run build');
+    }
+  });
+}
 
 // Sessions Map: token -> { phoneWs, uiWsSet, latestUsdzPath }
 const sessions = new Map();
@@ -111,7 +148,8 @@ wss.on('connection', (ws, req) => {
   let role = null;
   let session = null;
 
-  console.log('[WebSocket] New client connecting...');
+  const clientIP = req.socket.remoteAddress || 'unknown';
+  console.log(`[WebSocket] New client connecting from ${clientIP}...`);
   
   // Handle pong responses
   ws.on('pong', () => {
@@ -146,9 +184,12 @@ wss.on('connection', (ws, req) => {
             return;
           }
 
-          token = message.token;
+          // Trim whitespace from token to handle copy-paste issues
+          token = message.token.trim();
           role = message.role;
           session = getOrCreateSession(token);
+          
+          console.log(`[WebSocket] Hello from ${role}: token="${token}" (length: ${token.length})`);
 
           if (role === 'phone') {
             // Only one phone connection per session
@@ -174,7 +215,7 @@ wss.on('connection', (ws, req) => {
           return;
         } else if (role === 'phone') {
           // Messages from phone to UI
-          const allowedTypes = ['room_update', 'instruction', 'status'];
+          const allowedTypes = ['room_update', 'instruction', 'status', 'mesh_update'];
           if (allowedTypes.includes(message.type)) {
             console.log(`[Relay] Phone -> UI (${message.type}) in session ${token}`);
             sendToUI(token, message);
@@ -198,25 +239,26 @@ wss.on('connection', (ws, req) => {
 
   // Handle connection close
   ws.on('close', (code, reason) => {
+    const reasonStr = reason ? reason.toString() : 'no reason';
     if (token && role && session) {
       if (role === 'phone') {
         session.phoneWs = null;
-        console.log(`[Session] Phone disconnected: ${token} (code: ${code})`);
+        console.log(`[Session] Phone disconnected: ${token} from ${clientIP} (code: ${code}, reason: ${reasonStr})`);
         // Notify UI clients that phone disconnected
         sendToUI(token, { type: 'status', value: 'phone_disconnected', timestamp: new Date().toISOString() });
       } else if (role === 'ui') {
         session.uiWsSet.delete(ws);
-        console.log(`[Session] UI client disconnected: ${token} (${session.uiWsSet.size} UI client(s) remaining, code: ${code})`);
+        console.log(`[Session] UI client disconnected: ${token} from ${clientIP} (${session.uiWsSet.size} UI client(s) remaining, code: ${code})`);
       }
       cleanupSession(token);
     } else {
-      console.log(`[WebSocket] Unauthenticated client disconnected (code: ${code})`);
+      console.log(`[WebSocket] Unauthenticated client disconnected from ${clientIP} (code: ${code}, reason: ${reasonStr})`);
     }
   });
 
   // Handle errors
   ws.on('error', (error) => {
-    console.error(`[WebSocket] Error for ${role || 'unknown'} client (token: ${token || 'none'}):`, error);
+    console.error(`[WebSocket] Error from ${clientIP} (role: ${role || 'unknown'}, token: ${token || 'none'}):`, error.message || error);
   });
 });
 
@@ -251,25 +293,72 @@ const upload = multer({
 
 // HTTP Routes
 
-// Helper: Get local IP address
-function getLocalIP() {
+// Helper: Get all local IPv4 addresses
+function getAllLocalIPs() {
   const interfaces = os.networkInterfaces();
+  const ips = [];
   for (const name of Object.keys(interfaces)) {
     for (const iface of interfaces[name]) {
-      // Skip internal (loopback) and non-IPv4 addresses
       if (iface.family === 'IPv4' && !iface.internal) {
-        return iface.address;
+        ips.push(iface.address);
       }
     }
   }
-  return 'localhost';
+  return ips;
+}
+
+// Helper: Get local IP address (best effort)
+function getLocalIP() {
+  const ips = getAllLocalIPs();
+  return ips[0] || 'localhost';
+}
+
+function getRequestHost(req) {
+  const host = (req.hostname || '').trim();
+  if (!host || host === 'localhost' || host === '127.0.0.1') {
+    return null;
+  }
+  return host;
+}
+
+function getDefaultRouteIP(timeoutMs = 200) {
+  return new Promise((resolve) => {
+    const socket = dgram.createSocket('udp4');
+    let settled = false;
+
+    const finish = (ip) => {
+      if (settled) return;
+      settled = true;
+      try {
+        socket.close();
+      } catch {}
+      resolve(ip || null);
+    };
+
+    const timer = setTimeout(() => finish(null), timeoutMs);
+
+    socket.on('error', () => {
+      clearTimeout(timer);
+      finish(null);
+    });
+
+    socket.connect(80, '8.8.8.8', () => {
+      clearTimeout(timer);
+      const address = socket.address();
+      finish(address && address.address ? address.address : null);
+    });
+  });
 }
 
 // GET /new - Generate new session token
 app.get('/new', async (req, res) => {
   try {
-    const token = generateToken();
-    const localIP = getLocalIP();
+    const requestedToken = typeof req.query.token === 'string' ? req.query.token.trim() : '';
+    const token = requestedToken || generateToken();
+    const requestHost = getRequestHost(req);
+    const routeIP = await getDefaultRouteIP();
+    const localIP = requestHost || routeIP || getLocalIP();
+    const availableIPs = Array.from(new Set(getAllLocalIPs()));
     const url = `http://${localIP}:${PORT}/download/${token}/room.usdz`;
     
     // Create pairing URL with token and host
@@ -288,6 +377,7 @@ app.get('/new', async (req, res) => {
       url,
       qrDataUrl,
       laptopIP: localIP,
+      availableIPs,
       pairingUrl: pairingUrl
     });
   } catch (error) {
@@ -421,6 +511,29 @@ app.get('/health', (req, res) => {
     status: 'ok', 
     timestamp: new Date().toISOString(),
     activeSessions: sessions.size
+  });
+});
+
+// Debug endpoint - shows all active sessions (remove in production)
+app.get('/debug/sessions', (req, res) => {
+  const sessionList = [];
+  sessions.forEach((session, token) => {
+    sessionList.push({
+      token: token,
+      tokenTruncated: token.substring(0, 8) + '...',
+      phoneConnected: session.phoneWs !== null && session.phoneWs.readyState === 1,
+      phoneReadyState: session.phoneWs?.readyState ?? 'null',
+      uiClientsCount: session.uiWsSet.size,
+      hasUsdzFile: session.latestUsdzPath !== null
+    });
+  });
+  
+  console.log('[Debug] Current sessions:', JSON.stringify(sessionList, null, 2));
+  
+  res.json({
+    timestamp: new Date().toISOString(),
+    totalSessions: sessions.size,
+    sessions: sessionList
   });
 });
 

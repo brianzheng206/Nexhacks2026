@@ -3,28 +3,19 @@
 //  PairingView.swift
 //  RoomScanRemote
 //
-//  Pairing screen with IP and token input
+//  Pairing screen with server address and token input
 //
 
 import SwiftUI
-
-// Custom text field style for dark theme
-struct DarkTextFieldStyle: TextFieldStyle {
-    func _body(configuration: TextField<Self._Label>) -> some View {
-        configuration
-            .padding(14)
-            .background(Color.appPanel)
-            .foregroundColor(.appText)
-            .cornerRadius(10)
-            .overlay(
-                RoundedRectangle(cornerRadius: 10)
-                    .stroke(Color.appBorder.opacity(0.3), lineWidth: 1)
-            )
-    }
-}
+import Foundation
 
 struct PairingView: View {
-    @State private var laptopIP: String = ""
+    private let defaultPort = 8080
+
+    @State private var connectionManager = ConnectionManager()
+    @State private var serverAddress: String = ""
+    @State private var serverHost: String = ""
+    @State private var serverPort: Int = 8080
     @State private var token: String = ""
     @State private var isConnecting: Bool = false
     @State private var errorMessage: String?
@@ -32,157 +23,327 @@ struct PairingView: View {
     @State private var showQRScanner: Bool = false
     @State private var scannedToken: String?
     @State private var scannedHost: String?
+    @State private var scannedPort: Int?
+    
+    // Validation states
+    @State private var isServerAddressValid: Bool = true
+    @State private var isTokenValid: Bool = true
+    @State private var serverAddressValidationMessage: String = ""
+    @State private var tokenValidationMessage: String = ""
+    @State private var hasAttemptedAutoConnect: Bool = false
+    @State private var autoConnectDebounceTask: DispatchWorkItem?
     
     var body: some View {
-        NavigationView {
-            ZStack {
-                // Dark background
-                Color.appBackground
-                    .ignoresSafeArea()
+        NavigationStack {
+            VStack(spacing: 20) {
+                Text("RoomScan Remote")
+                    .font(.largeTitle)
+                    .fontWeight(.bold)
+                    .padding(.bottom, 40)
                 
-                VStack(spacing: 30) {
-                    // Header
-                    VStack(spacing: 8) {
-                        Text("RoomScan Remote")
-                            .font(.system(size: 32, weight: .bold))
-                            .foregroundColor(.appText)
-                        
-                        Text("Connect to your laptop")
-                            .font(.subheadline)
-                            .foregroundColor(.appTextSecondary)
-                    }
-                    .padding(.top, 40)
-                    .padding(.bottom, 20)
-                    
-                    // Input fields
-                    VStack(spacing: 20) {
-                        VStack(alignment: .leading, spacing: 8) {
-                            Text("Laptop IP Address")
-                                .font(.headline)
-                                .foregroundColor(.appText)
-                            TextField("e.g., 192.168.1.100 or localhost", text: $laptopIP)
-                                .textFieldStyle(DarkTextFieldStyle())
-                                .keyboardType(.numbersAndPunctuation)
-                                .autocapitalization(.none)
-                                .disableAutocorrection(true)
-                        }
-                        
-                        VStack(alignment: .leading, spacing: 8) {
-                            Text("Session Token")
-                                .font(.headline)
-                                .foregroundColor(.appText)
-                            TextField("Enter token", text: $token)
-                                .textFieldStyle(DarkTextFieldStyle())
-                                .autocapitalization(.none)
-                                .disableAutocorrection(true)
-                        }
-                    }
-                    .padding(.horizontal, 24)
-                    
-                    // Error message
-                    if let error = errorMessage {
-                        HStack {
-                            Image(systemName: "exclamationmark.triangle.fill")
-                                .foregroundColor(.statusError)
-                            Text(error)
-                                .foregroundColor(.statusError)
-                                .font(.caption)
-                        }
-                        .padding(.horizontal, 24)
-                    }
-                    
-                    // Buttons
-                    VStack(spacing: 12) {
-                        Button(action: { showQRScanner = true }) {
-                            HStack(spacing: 10) {
-                                Image(systemName: "qrcode.viewfinder")
-                                    .font(.system(size: 18, weight: .medium))
-                                Text("Scan QR Code")
-                                    .fontWeight(.semibold)
-                            }
-                            .frame(maxWidth: .infinity)
-                            .padding(.vertical, 16)
-                            .background(Color.buttonSuccess)
-                            .foregroundColor(.white)
-                            .cornerRadius(12)
-                        }
-                        
-                        Button(action: connect) {
-                            HStack(spacing: 10) {
-                                if isConnecting {
-                                    ProgressView()
-                                        .progressViewStyle(CircularProgressViewStyle(tint: .white))
-                                }
-                                Text(isConnecting ? "Connecting..." : "Connect")
-                                    .fontWeight(.semibold)
-                            }
-                            .frame(maxWidth: .infinity)
-                            .padding(.vertical, 16)
-                            .background(isConnecting || laptopIP.isEmpty || token.isEmpty ? Color.buttonDisabled : Color.buttonPrimary)
-                            .foregroundColor(.white)
-                            .cornerRadius(12)
-                        }
-                        .disabled(isConnecting || laptopIP.isEmpty || token.isEmpty)
-                    }
-                    .padding(.horizontal, 24)
-                    .padding(.top, 10)
-                    
-                    Spacer()
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("Server Address")
+                        .font(.headline)
+                    TextField("e.g., 192.168.1.100:8080", text: $serverAddress)
+                        .textFieldStyle(RoundedBorderTextFieldStyle())
+                        .keyboardType(.URL)
+                        .autocapitalization(.none)
+                        .disableAutocorrection(true)
                 }
+                
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("Session Token")
+                        .font(.headline)
+                    TextField("Enter token", text: $token)
+                        .textFieldStyle(RoundedBorderTextFieldStyle())
+                        .autocapitalization(.none)
+                        .disableAutocorrection(true)
+                }
+                
+                if let error = errorMessage {
+                    Text(error)
+                        .foregroundColor(.red)
+                        .font(.caption)
+                        .padding(.horizontal)
+                }
+                
+                Button(action: { showQRScanner = true }) {
+                    HStack {
+                        Image(systemName: "qrcode.viewfinder")
+                            .font(.system(size: 20))
+                        Text("Scan QR Code")
+                            .fontWeight(.semibold)
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding()
+                    .background(Color.green)
+                    .foregroundColor(.white)
+                    .cornerRadius(10)
+                }
+                .padding(.top, 10)
+                
+                Button(action: connect) {
+                    HStack {
+                        if isConnecting {
+                            ProgressView()
+                                .progressViewStyle(CircularProgressViewStyle(tint: .white))
+                                .padding(.trailing, 8)
+                        }
+                        Text(isConnecting ? "Connecting..." : "Connect")
+                            .fontWeight(.semibold)
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding()
+                    .background(isConnecting ? Color.gray : Color.blue)
+                    .foregroundColor(.white)
+                    .cornerRadius(10)
+                }
+                .disabled(isConnecting || serverAddress.isEmpty || token.isEmpty || !isServerAddressValid || !isTokenValid)
+                .padding(.top, 10)
+                
+                Spacer()
             }
-            .navigationBarHidden(true)
-            .background(
-                NavigationLink(
-                    destination: ScanView(laptopIP: laptopIP, token: token),
-                    isActive: $navigateToScan
-                ) {
-                    EmptyView()
-                }
-            )
+            .padding()
+            .navigationTitle("RoomScan Remote")
+            .navigationBarTitleDisplayMode(.inline)
+            .fullScreenCover(isPresented: $navigateToScan) {
+                ScanView(serverHost: serverHost, serverPort: serverPort, token: token)
+            }
             .sheet(isPresented: $showQRScanner) {
-                QRScannerView(scannedToken: $scannedToken, scannedHost: $scannedHost)
+                QRScannerView(scannedToken: $scannedToken, scannedHost: $scannedHost, scannedPort: $scannedPort)
             }
-            .onChange(of: scannedToken) { newToken in
-                if let token = newToken {
-                    self.token = token
-                    // If host was also scanned, use it; otherwise prompt for IP
-                    if let host = scannedHost {
-                        self.laptopIP = host
-                    }
-                }
+            .onChange(of: scannedToken) { _, _ in
+                applyScannedValues()
+            }
+            .onChange(of: scannedHost) { _, _ in
+                applyScannedValues()
+            }
+            .onChange(of: scannedPort) { _, _ in
+                applyScannedValues()
             }
         }
     }
     
+    // Real-time validation for server address
+    private func validateServerAddress(_ address: String) {
+        let trimmed = address.trimmingCharacters(in: .whitespacesAndNewlines)
+        
+        if trimmed.isEmpty {
+            isServerAddressValid = true // Don't show error for empty field
+            serverAddressValidationMessage = ""
+            return
+        }
+        
+        if let parsed = parseServerAddress(trimmed) {
+            isServerAddressValid = true
+            serverAddressValidationMessage = ""
+        } else {
+            isServerAddressValid = false
+            serverAddressValidationMessage = "Invalid format. Use: hostname or hostname:port (e.g., 192.168.1.100:8080)"
+        }
+    }
+    
+    // Real-time validation for token
+    private func validateToken(_ tokenValue: String) {
+        let trimmed = tokenValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        
+        if trimmed.isEmpty {
+            isTokenValid = true // Don't show error for empty field
+            tokenValidationMessage = ""
+            return
+        }
+        
+        // Token should be non-empty after trimming
+        if trimmed.isEmpty {
+            isTokenValid = false
+            tokenValidationMessage = "Session token cannot be empty or only whitespace"
+            return
+        }
+        
+        // Optional: Add format validation if tokens have a specific format
+        // For now, just check it's not empty
+        isTokenValid = true
+        tokenValidationMessage = ""
+    }
+    
+    // Check server reachability before attempting WebSocket connection
+    private func checkReachability(host: String, port: Int, completion: @escaping (Bool, String?) -> Void) {
+        let urlString = "http://\(host):\(port)/health"
+        guard let url = URL(string: urlString) else {
+            completion(false, "Invalid server URL")
+            return
+        }
+        
+        var request = URLRequest(url: url)
+        request.httpMethod = "GET"
+        request.timeoutInterval = 3.0 // 3 second timeout for reachability check
+        
+        let task = URLSession.shared.dataTask(with: request) { data, response, error in
+            if let error = error {
+                if let urlError = error as? URLError {
+                    switch urlError.code {
+                    case .notConnectedToInternet:
+                        completion(false, "No internet connection")
+                    case .cannotConnectToHost, .timedOut:
+                        completion(false, "Cannot reach server. Check address and ensure server is running.")
+                    case .dnsLookupFailed:
+                        completion(false, "DNS lookup failed. Check server address.")
+                    default:
+                        completion(false, "Server unreachable: \(urlError.localizedDescription)")
+                    }
+                } else {
+                    completion(false, "Reachability check failed: \(error.localizedDescription)")
+                }
+                return
+            }
+            
+            // If we get any response (even 404), server is reachable
+            if let httpResponse = response as? HTTPURLResponse {
+                completion(true, nil)
+            } else {
+                completion(true, nil) // Non-HTTP response still means server is reachable
+            }
+        }
+        
+        task.resume()
+    }
+    
     private func connect() {
-        guard !laptopIP.isEmpty, !token.isEmpty else {
-            errorMessage = "Please enter both IP address and token"
+        guard !serverAddress.isEmpty, !token.isEmpty else {
+            errorMessage = "Please enter both server address and token"
+            return
+        }
+        
+        guard isServerAddressValid, isTokenValid else {
+            errorMessage = "Please fix validation errors before connecting"
+            return
+        }
+        
+        // Prevent multiple simultaneous connection attempts
+        guard !isConnecting else {
             return
         }
         
         isConnecting = true
         errorMessage = nil
         
-        // Validate IP format (basic check)
-        let ipComponents = laptopIP.split(separator: ".")
-        guard ipComponents.count == 4,
-              ipComponents.allSatisfy({ Int($0) != nil && (0...255).contains(Int($0)!) }) else {
-            errorMessage = "Invalid IP address format"
+        // Reset auto-connect flag when manually connecting
+        hasAttemptedAutoConnect = false
+        
+        guard let parsed = parseServerAddress(serverAddress) else {
+            errorMessage = "Invalid server address. Use host or host:port."
+            isConnecting = false
+            return
+        }
+        serverHost = parsed.host
+        serverPort = parsed.port
+        
+        // Normalize token trimming at entry point (before passing to WSClient)
+        let trimmedToken = token.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedToken.isEmpty else {
+            errorMessage = "Session token cannot be empty"
             isConnecting = false
             return
         }
         
-        // Initialize WebSocket client and attempt connection
-        let wsClient = WSClient.shared
-        wsClient.connect(laptopIP: laptopIP, token: token) { success, error in
-            DispatchQueue.main.async {
-                isConnecting = false
-                if success {
-                    navigateToScan = true
-                } else {
-                    errorMessage = error ?? "Connection failed"
+        // Check server reachability first
+        // Note: PairingView is a struct, so we don't need [weak self] - structs don't have retain cycles
+        checkReachability(host: parsed.host, port: parsed.port) { reachable, error in
+            if !reachable {
+                DispatchQueue.main.async {
+                    self.isConnecting = false
+                    self.errorMessage = error ?? "Server unreachable. Please check your network and server address."
+                }
+                return
+            }
+            
+            // Server is reachable, proceed with WebSocket connection
+            // Call WSClient directly (like the old working version) but also update ConnectionManager state
+            let wsClient = WSClient.shared
+            wsClient.connect(laptopHost: parsed.host, port: parsed.port, token: trimmedToken) { success, error in
+                DispatchQueue.main.async {
+                    // Update ConnectionManager state to match
+                    if success {
+                        self.connectionManager.connectionState = .connected
+                    } else {
+                        let errorMessage = error ?? "Unknown error"
+                        self.connectionManager.connectionState = .failed(errorMessage)
+                    }
+                    
+                    self.isConnecting = false
+                    if success {
+                        self.navigateToScan = true
+                    } else {
+                        // Provide user-friendly error messages
+                        let userMessage = error ?? "Connection failed. Please check your network and server settings."
+                        self.errorMessage = userMessage
+                    }
                 }
             }
         }
+    }
+
+    private func applyScannedValues() {
+        if let token = scannedToken?.trimmingCharacters(in: .whitespacesAndNewlines), !token.isEmpty {
+            self.token = token
+        }
+        if let host = scannedHost?.trimmingCharacters(in: .whitespacesAndNewlines), !host.isEmpty {
+            if let port = scannedPort {
+                serverAddress = "\(host):\(port)"
+            } else {
+                serverAddress = host
+            }
+        }
+        attemptAutoConnect()
+    }
+
+    private func parseServerAddress(_ input: String) -> (host: String, port: Int)? {
+        let trimmed = input.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+
+        if let url = URL(string: trimmed),
+           url.scheme == "roomscan",
+           url.host == "pair" {
+            let components = URLComponents(url: url, resolvingAgainstBaseURL: false)
+            let host = components?.queryItems?.first(where: { $0.name == "host" })?.value
+            let portValue = components?.queryItems?.first(where: { $0.name == "port" })?.value
+            let port = Int(portValue ?? "") ?? defaultPort
+            if let host = host, !host.isEmpty {
+                return (host, port)
+            }
+        }
+
+        if trimmed.contains("://") || trimmed.contains("/") || trimmed.contains("?") {
+            let urlString = trimmed.contains("://") ? trimmed : "http://\(trimmed)"
+            if let url = URL(string: urlString), let host = url.host, !host.isEmpty {
+                return (host, url.port ?? defaultPort)
+            }
+        }
+
+        let parts = trimmed.split(separator: ":", maxSplits: 1, omittingEmptySubsequences: false)
+        if parts.count == 2 {
+            let host = String(parts[0])
+            let portValue = String(parts[1])
+            guard !host.isEmpty,
+                  let port = Int(portValue),
+                  (1...65535).contains(port) else {
+                return nil
+            }
+            return (host, port)
+        }
+
+        return (trimmed, defaultPort)
+    }
+
+    private func attemptAutoConnect() {
+        // Prevent multiple connection attempts
+        guard !isConnecting, !hasAttemptedAutoConnect else {
+            return
+        }
+        
+        hasAttemptedAutoConnect = true
+        guard !isConnecting, !navigateToScan else { return }
+        guard !serverAddress.isEmpty, !token.isEmpty else { return }
+        connect()
     }
 }

@@ -9,11 +9,15 @@
 import SwiftUI
 import AVFoundation
 import AudioToolbox
+import UIKit
+
+private let logger = AppLogger.qrScanner
 
 struct QRScannerView: UIViewControllerRepresentable {
     @Binding var scannedToken: String?
     @Binding var scannedHost: String?
-    @Environment(\.presentationMode) var presentationMode
+    @Binding var scannedPort: Int?
+    @Environment(\.dismiss) var dismiss
     
     func makeUIViewController(context: Context) -> QRScannerViewController {
         let controller = QRScannerViewController()
@@ -36,22 +40,42 @@ struct QRScannerView: UIViewControllerRepresentable {
             self.parent = parent
         }
         
-        func didScanQRCode(token: String?, host: String?) {
-            parent.scannedToken = token
-            parent.scannedHost = host
-            parent.presentationMode.wrappedValue.dismiss()
+        func didScanQRCode(token: String?, host: String?, port: Int?, error: String?) {
+            if let error = error {
+                // Show error alert
+                DispatchQueue.main.async {
+                    let alert = UIAlertController(
+                        title: "Invalid QR Code",
+                        message: error,
+                        preferredStyle: .alert
+                    )
+                    alert.addAction(UIAlertAction(title: "OK", style: .default))
+                    // Note: We can't easily show alert from here without view controller reference
+                    // The error will be handled by the parent view
+                }
+            } else {
+                parent.scannedToken = token
+                parent.scannedHost = host
+                parent.scannedPort = port
+                parent.dismiss()
+            }
         }
     }
 }
 
 protocol QRScannerDelegate: AnyObject {
-    func didScanQRCode(token: String?, host: String?)
+    func didScanQRCode(token: String?, host: String?, port: Int?, error: String?)
 }
 
 class QRScannerViewController: UIViewController {
     weak var delegate: QRScannerDelegate?
     var captureSession: AVCaptureSession?
     var previewLayer: AVCaptureVideoPreviewLayer?
+    
+    // Track last scanned value to prevent duplicate scans
+    private var lastScannedValue: String?
+    private var lastScanTime: Date?
+    private let scanDebounceInterval: TimeInterval = 1.0 // Ignore duplicate scans within 1 second
     
     override func viewDidLoad() {
         super.viewDidLoad()
@@ -84,7 +108,7 @@ class QRScannerViewController: UIViewController {
     
     private func setupCamera() {
         guard let videoCaptureDevice = AVCaptureDevice.default(for: .video) else {
-            print("[QRScanner] No video capture device available")
+            logger.error("No video capture device available")
             return
         }
         
@@ -93,7 +117,7 @@ class QRScannerViewController: UIViewController {
         do {
             videoInput = try AVCaptureDeviceInput(device: videoCaptureDevice)
         } catch {
-            print("[QRScanner] Error creating video input: \(error)")
+            logger.error("Error creating video input: \(error.localizedDescription)")
             return
         }
         
@@ -103,7 +127,7 @@ class QRScannerViewController: UIViewController {
         if captureSession.canAddInput(videoInput) {
             captureSession.addInput(videoInput)
         } else {
-            print("[QRScanner] Cannot add video input")
+            logger.error("Cannot add video input")
             return
         }
         
@@ -115,7 +139,7 @@ class QRScannerViewController: UIViewController {
             metadataOutput.setMetadataObjectsDelegate(self, queue: DispatchQueue.main)
             metadataOutput.metadataObjectTypes = [.qr]
         } else {
-            print("[QRScanner] Cannot add metadata output")
+            logger.error("Cannot add metadata output")
             return
         }
         
@@ -173,7 +197,7 @@ class QRScannerViewController: UIViewController {
         dismiss(animated: true)
     }
     
-    private func parseQRCode(_ string: String) -> (token: String?, host: String?) {
+    private func parseQRCode(_ string: String) -> (token: String?, host: String?, port: Int?, error: String?) {
         // Try to parse roomscan://pair?token=...&host=...&port=...
         if let url = URL(string: string),
            url.scheme == "roomscan",
@@ -183,21 +207,32 @@ class QRScannerViewController: UIViewController {
             
             let token = queryItems?.first(where: { $0.name == "token" })?.value
             let host = queryItems?.first(where: { $0.name == "host" })?.value
+            let portValue = queryItems?.first(where: { $0.name == "port" })?.value
+            let port = portValue.flatMap { Int($0) }
             
-            return (token, host)
+            if token == nil {
+                return (nil, nil, nil, "QR code missing session token. Expected format: roomscan://pair?token=...&host=...&port=...")
+            }
+            if host == nil {
+                return (nil, nil, nil, "QR code missing server address. Expected format: roomscan://pair?token=...&host=...&port=...")
+            }
+            
+            return (token, host, port, nil)
         }
         
         // Try to parse http://.../download/<token>/room.usdz
-        if let url = URL(string: string),
-           url.scheme == "http" || url.scheme == "https",
-           let pathComponents = url.pathComponents,
-           pathComponents.count >= 3 {
-            // Extract token from path like /download/<token>/room.usdz
-            let tokenIndex = pathComponents.firstIndex(of: "download")
-            if let index = tokenIndex, index + 1 < pathComponents.count {
-                let token = pathComponents[index + 1]
-                let host = url.host
-                return (token, host)
+        if let url = URL(string: string) {
+            let pathComponents = url.pathComponents
+            if pathComponents.count >= 3 {
+                // Extract token from path like /download/<token>/room...
+                if let tokenIndex = pathComponents.firstIndex(of: "download"), tokenIndex + 1 < pathComponents.count {
+                    let token = pathComponents[tokenIndex + 1]
+                    let host = url.host
+                    if token.isEmpty {
+                        return (nil, nil, nil, "QR code missing session token in URL path. Expected format: http://host:port/download/<token>/room.usdz")
+                    }
+                    return (token, host, url.port, nil)
+                }
             }
         }
         
@@ -207,30 +242,59 @@ class QRScannerViewController: UIViewController {
            let queryItems = components.queryItems {
             let token = queryItems.first(where: { $0.name == "token" })?.value
             let host = queryItems.first(where: { $0.name == "host" })?.value ?? url.host
-            return (token, host)
+            if token == nil {
+                return (nil, nil, nil, "QR code missing token parameter. Expected format: http://host:port?token=...&host=...")
+            }
+            return (token, host, url.port, nil)
         }
         
-        return (nil, nil)
+        // No valid format found
+        return (nil, nil, nil, "Invalid QR code format. Expected one of:\n• roomscan://pair?token=<session_token>&host=<server>&port=<port>\n• http://host:port/download/<session_token>/room.usdz\n• http://host:port?token=<session_token>&host=<server>")
     }
 }
 
 extension QRScannerViewController: AVCaptureMetadataOutputObjectsDelegate {
+    // Track last scanned value to prevent duplicate scans
+    private var lastScannedValue: String?
+    private var lastScanTime: Date?
+    private let scanDebounceInterval: TimeInterval = 1.0 // Ignore duplicate scans within 1 second
+    
     func metadataOutput(_ output: AVCaptureMetadataOutput, didOutput metadataObjects: [AVMetadataObject], from connection: AVCaptureConnection) {
-        if let metadataObject = metadataObjects.first {
-            guard let readableObject = metadataObject as? AVMetadataMachineReadableCodeObject else { return }
-            guard let stringValue = readableObject.stringValue else { return }
-            
-            // Stop scanning
-            captureSession?.stopRunning()
-            
-            // Parse QR code
-            let (token, host) = parseQRCode(stringValue)
-            
-            // Vibrate on success
-            AudioServicesPlaySystemSound(SystemSoundID(kSystemSoundID_Vibrate))
-            
-            // Notify delegate
-            delegate?.didScanQRCode(token: token, host: host)
+        guard let metadataObject = metadataObjects.first else { return }
+        guard let readableObject = metadataObject as? AVMetadataMachineReadableCodeObject else { return }
+        guard let stringValue = readableObject.stringValue else { return }
+        
+        // Debounce: Ignore duplicate scans within debounce interval
+        let now = Date()
+        if let lastValue = lastScannedValue, lastValue == stringValue,
+           let lastTime = lastScanTime, now.timeIntervalSince(lastTime) < scanDebounceInterval {
+            logger.debug("Ignoring duplicate QR scan (debounced)")
+            return
         }
+        
+        lastScannedValue = stringValue
+        lastScanTime = now
+        
+        // Stop scanning to prevent multiple detections
+        captureSession?.stopRunning()
+        
+        // Parse QR code
+        let (token, host, port, error) = parseQRCode(stringValue)
+        
+        if error == nil && token != nil {
+            // Success - provide haptic feedback
+            let generator = UINotificationFeedbackGenerator()
+            generator.notificationOccurred(.success)
+            
+            // Also vibrate for older devices
+            AudioServicesPlaySystemSound(SystemSoundID(kSystemSoundID_Vibrate))
+        } else {
+            // Error - provide error haptic feedback
+            let generator = UINotificationFeedbackGenerator()
+            generator.notificationOccurred(.error)
+        }
+        
+        // Notify delegate (only once per unique scan)
+        delegate?.didScanQRCode(token: token, host: host, port: port, error: error)
     }
 }

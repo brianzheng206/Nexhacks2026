@@ -1,5 +1,4 @@
-@ -1,17 +0,0 @@
-//
+
 //  RoomScanRemoteApp.swift
 //  RoomScanRemote
 //
@@ -13,7 +12,6 @@ struct RoomScanRemoteApp: App {
     var body: some Scene {
         WindowGroup {
             PairingView()
-                .preferredColorScheme(.dark) // Force dark mode to match theme
         }
     }
 }
