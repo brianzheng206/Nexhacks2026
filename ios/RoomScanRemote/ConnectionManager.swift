@@ -61,14 +61,20 @@ final class ConnectionManager {
         wsClient.onConnectionStateChanged = { [weak self] isConnected in
             guard let self = self else { return }
             DispatchQueue.main.async {
+                // Use a debounce mechanism to prevent rapid state changes that cause flickering
+                let currentState = self.connectionState
+                
                 if isConnected {
                     // Only update to connected if we're in a connecting/connected/reconnecting state
-                    // This prevents race conditions
-                    switch self.connectionState {
+                    // This prevents race conditions and flickering
+                    switch currentState {
                     case .connecting, .connected, .reconnecting:
-                        self.connectionState = .connected
-                        self.reconnectAttempts = 0
-                        self.cancelAutoReconnect()
+                        // Only update if not already connected to prevent unnecessary updates
+                        if currentState != .connected {
+                            self.connectionState = .connected
+                            self.reconnectAttempts = 0
+                            self.cancelAutoReconnect()
+                        }
                     case .disconnected, .failed:
                         // If we're disconnected/failed, don't auto-update to connected
                         // This prevents stale callbacks from updating state
@@ -76,12 +82,17 @@ final class ConnectionManager {
                     }
                 } else {
                     // Only update to disconnected if we were actually connected
-                    switch self.connectionState {
+                    // Add a small delay to debounce rapid disconnection events
+                    switch currentState {
                     case .connected, .reconnecting:
-                        self.connectionState = .disconnected
-                        // Trigger auto-reconnect if enabled
-                        if self.autoReconnectEnabled {
-                            self.startAutoReconnect()
+                        // Debounce: only update if we're still disconnected after a short delay
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
+                            guard let self = self, !self.wsClient.isConnected else { return }
+                            self.connectionState = .disconnected
+                            // Trigger auto-reconnect if enabled
+                            if self.autoReconnectEnabled {
+                                self.startAutoReconnect()
+                            }
                         }
                     case .connecting:
                         // If we were connecting and got disconnected, don't change state yet

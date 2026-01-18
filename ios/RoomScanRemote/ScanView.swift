@@ -26,18 +26,23 @@ struct RoomCaptureViewRepresentable: UIViewRepresentable {
     }
     
     func updateUIView(_ uiView: RoomCaptureView, context: Context) {
-        // Only update if session changed - avoid unnecessary reassignments that cause jitter
-        // SwiftUI calls this frequently, so we minimize work here
+        // Minimize updates to prevent flickering - only update when absolutely necessary
+        // SwiftUI calls this very frequently, so we do minimal work here
+        // Most updates are handled in makeUIView, so this should rarely need to do anything
         if let session = uiView.captureSession {
-            // Only reassign if delegate is actually different to avoid unnecessary updates
-            if session.delegate !== scanController {
+            // Use identity check first to avoid unnecessary work
+            let needsDelegateUpdate = session.delegate !== scanController
+            let needsARSessionDelegateUpdate = session.arSession.delegate !== scanController
+            let needsSessionUpdate = scanController.roomCaptureSession !== session
+            
+            // Only perform updates if something actually changed
+            if needsDelegateUpdate {
                 session.delegate = scanController
             }
-            if session.arSession.delegate !== scanController {
+            if needsARSessionDelegateUpdate {
                 session.arSession.delegate = scanController
             }
-            // Only update if session reference changed
-            if scanController.roomCaptureSession !== session {
+            if needsSessionUpdate {
                 scanController.roomCaptureSession = session
             }
         }
@@ -136,8 +141,9 @@ struct ScanView: View {
             
             setupWebSocketHandlers()
             
-            // Enable automatic reconnection for better reliability
-            connectionManager.enableAutoReconnect()
+            // Don't enable auto-reconnect by default - it can cause flickering
+            // Auto-reconnect should only be enabled if explicitly needed
+            // connectionManager.enableAutoReconnect()
             
             // Ensure connection is established - reconnect if needed
             if !connectionManager.isConnected {
@@ -172,9 +178,12 @@ struct ScanView: View {
                 Text("Are you sure you want to leave? This will disconnect from the server.")
             }
         }
-        .onChange(of: connectionManager.connectionState) { _, newState in
-            updateConnectionState()
-            handleConnectionStateChange(newState)
+        .onChange(of: connectionManager.connectionState) { oldState, newState in
+            // Only update if state actually changed to prevent unnecessary updates
+            if oldState != newState {
+                updateConnectionState()
+                handleConnectionStateChange(newState)
+            }
         }
         .onChange(of: connectionManager.connectionQuality) { _, quality in
             updateStatus()
@@ -365,7 +374,7 @@ struct ScanView: View {
             scanController.stopScan()
         }
         
-        // Disable auto-reconnect before disconnecting
+        // Disable auto-reconnect before disconnecting (if it was enabled)
         connectionManager.disableAutoReconnect()
         connectionManager.disconnect()
     }

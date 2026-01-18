@@ -520,10 +520,42 @@ app.post('/upload/usdz', upload.single('file'), (req, res) => {
     }
 
     const filePath = req.file.path;
+    
+    // Verify the file was written completely by checking its size
+    if (fs.existsSync(filePath)) {
+      const stats = fs.statSync(filePath);
+      const actualSize = stats.size;
+      const reportedSize = req.file.size;
+      
+      if (actualSize !== reportedSize) {
+        console.error(`[HTTP] File size mismatch for token ${token}: reported ${reportedSize} bytes, actual ${actualSize} bytes`);
+        // Try to clean up the incomplete file
+        try {
+          fs.unlinkSync(filePath);
+        } catch (unlinkError) {
+          console.error('[HTTP] Failed to remove incomplete file:', unlinkError);
+        }
+        return res.status(500).json({ error: 'File upload incomplete - size mismatch' });
+      }
+      
+      if (actualSize === 0) {
+        console.error(`[HTTP] Uploaded file is empty for token: ${token}`);
+        try {
+          fs.unlinkSync(filePath);
+        } catch (unlinkError) {
+          console.error('[HTTP] Failed to remove empty file:', unlinkError);
+        }
+        return res.status(500).json({ error: 'Uploaded file is empty' });
+      }
+      
+      console.log(`[HTTP] File uploaded for token: ${token} (${actualSize} bytes, verified)`);
+    } else {
+      console.error(`[HTTP] Uploaded file does not exist at path: ${filePath}`);
+      return res.status(500).json({ error: 'File was not saved correctly' });
+    }
+    
     const session = getOrCreateSession(token);
     session.latestUsdzPath = filePath;
-
-    console.log(`[HTTP] File uploaded for token: ${token} (${req.file.size} bytes)`);
     
     const downloadUrl = `http://localhost:${PORT}/download/${token}/room.usdz`;
     
@@ -538,7 +570,8 @@ app.post('/upload/usdz', upload.single('file'), (req, res) => {
     res.json({
       success: true,
       token: token,
-      message: 'File uploaded successfully'
+      message: 'File uploaded successfully',
+      fileSize: fs.statSync(filePath).size
     });
   } catch (error) {
     console.error('[HTTP] Upload error:', error);

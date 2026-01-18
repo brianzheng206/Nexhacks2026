@@ -289,20 +289,14 @@ struct PairingView: View {
             }
             DispatchQueue.main.asyncAfter(deadline: .now() + 15.0, execute: maximumTimeout)
             
-            let wsClient = WSClient.shared
-            wsClient.connect(laptopHost: parsed.host, port: parsed.port, token: trimmedToken) { success, error in
+            // Use ConnectionManager's connect method to ensure state is properly managed
+            connectionManager.connect(laptopHost: parsed.host, port: parsed.port, token: trimmedToken) { success, error in
                 maximumTimeout.cancel()
                 
                 DispatchQueue.main.async {
-                    if success {
-                        self.connectionManager.connectionState = .connected
-                    } else {
-                        let errorMessage = error ?? "Unknown error"
-                        self.connectionManager.connectionState = .failed(errorMessage)
-                    }
-                    
                     self.isConnecting = false
                     if success {
+                        // ConnectionManager already updated the state, just navigate
                         self.navigateToScan = true
                     } else {
                         // Provide user-friendly error messages

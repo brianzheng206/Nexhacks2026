@@ -497,15 +497,38 @@ class ScanController: NSObject, ObservableObject {
         let builder = RoomBuilder(options: .beautifyObjects)
         
         do {
+            logger.info("Starting USDZ export...")
             let capturedRoom = try await builder.capturedRoom(from: capturedRoomData)
             
             let tempDir = FileManager.default.temporaryDirectory
             let fileName = "room_\(UUID().uuidString).usdz"
             let fileURL = tempDir.appendingPathComponent(fileName)
             
+            logger.info("Exporting USDZ to: \(fileURL.path)")
             try capturedRoom.export(to: fileURL, exportOptions: .mesh)
             
-            logger.info("USDZ exported to: \(fileURL.path)")
+            // Verify the file was created and get its size
+            let fileManager = FileManager.default
+            guard fileManager.fileExists(atPath: fileURL.path) else {
+                logger.error("USDZ file was not created at: \(fileURL.path)")
+                updateStateOnMain(errorMessage: "USDZ export failed - file not created")
+                return
+            }
+            
+            // Get file attributes to verify it's not empty
+            if let fileAttributes = try? fileManager.attributesOfItem(atPath: fileURL.path),
+               let fileSize = fileAttributes[.size] as? Int64 {
+                logger.info("USDZ exported successfully: \(fileURL.path) (\(fileSize) bytes)")
+                
+                if fileSize == 0 {
+                    logger.error("USDZ file is empty (0 bytes)")
+                    updateStateOnMain(errorMessage: "USDZ export failed - file is empty")
+                    try? fileManager.removeItem(at: fileURL)
+                    return
+                }
+            } else {
+                logger.warn("Could not verify USDZ file size, but file exists")
+            }
             
             let host: String?
             let port: Int
@@ -521,10 +544,16 @@ class ScanController: NSObject, ObservableObject {
                 uploadUSDZ(fileURL: fileURL, host: host, port: port, token: token)
             } else {
                 logger.error("Cannot upload: missing server host or token")
+                updateStateOnMain(errorMessage: "Cannot upload: missing connection information")
+                // Clean up temp file if we can't upload
+                try? fileManager.removeItem(at: fileURL)
             }
             
         } catch {
             logger.error("Error exporting USDZ: \(error.localizedDescription)")
+            if let nsError = error as NSError? {
+                logger.error("Error domain: \(nsError.domain), code: \(nsError.code)")
+            }
             updateStateOnMain(errorMessage: "Failed to export USDZ: \(error.localizedDescription)")
         }
     }
@@ -538,26 +567,62 @@ class ScanController: NSObject, ObservableObject {
             return
         }
         
+        // Get file attributes to check size and ensure file exists
+        let fileManager = FileManager.default
+        guard let fileAttributes = try? fileManager.attributesOfItem(atPath: fileURL.path),
+              let fileSize = fileAttributes[.size] as? Int64 else {
+            logger.error("Failed to get file attributes for: \(fileURL.path)")
+            updateStateOnMain(errorMessage: "Failed to read USDZ file attributes")
+            try? FileManager.default.removeItem(at: fileURL)
+            return
+        }
+        
+        logger.info("Uploading USDZ file: \(fileURL.path), size: \(fileSize) bytes")
+        
         var request = URLRequest(url: uploadURL)
         request.httpMethod = "POST"
+        request.timeoutInterval = 300.0 // 5 minute timeout for large files
         
         let boundary = UUID().uuidString
         request.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
         
-        var body = Data()
-        body.append("--\(boundary)\r\n".data(using: .utf8)!)
-        body.append("Content-Disposition: form-data; name=\"file\"; filename=\"room.usdz\"\r\n".data(using: .utf8)!)
-        body.append("Content-Type: application/octet-stream\r\n\r\n".data(using: .utf8)!)
-        
+        // Read file data - use proper error handling
         guard let fileData = try? Data(contentsOf: fileURL) else {
             logger.error("Failed to read file data from: \(fileURL.path)")
-            // Update error message on main thread (URLSession callback may be on background thread)
             updateStateOnMain(errorMessage: "Failed to read USDZ file")
+            try? FileManager.default.removeItem(at: fileURL)
             return
         }
         
+        // Verify we read the complete file
+        guard fileData.count == Int(fileSize) else {
+            logger.error("File size mismatch: expected \(fileSize) bytes, read \(fileData.count) bytes")
+            updateStateOnMain(errorMessage: "File read incomplete - file may be corrupted")
+            try? FileManager.default.removeItem(at: fileURL)
+            return
+        }
+        
+        logger.info("File data read successfully: \(fileData.count) bytes")
+        
+        // Build multipart form data
+        var body = Data()
+        
+        // Boundary and headers
+        let boundaryData = "--\(boundary)\r\n".data(using: .utf8)!
+        let contentDisposition = "Content-Disposition: form-data; name=\"file\"; filename=\"room.usdz\"\r\n".data(using: .utf8)!
+        let contentType = "Content-Type: application/octet-stream\r\n\r\n".data(using: .utf8)!
+        let closingBoundary = "\r\n--\(boundary)--\r\n".data(using: .utf8)!
+        
+        body.append(boundaryData)
+        body.append(contentDisposition)
+        body.append(contentType)
         body.append(fileData)
-        body.append("\r\n--\(boundary)--\r\n".data(using: .utf8)!)
+        body.append(closingBoundary)
+        
+        // Set Content-Length header for proper upload handling
+        request.setValue("\(body.count)", forHTTPHeaderField: "Content-Length")
+        
+        logger.info("Upload request body size: \(body.count) bytes")
         
         request.httpBody = body
         
@@ -571,14 +636,19 @@ class ScanController: NSObject, ObservableObject {
             
             if let httpResponse = response as? HTTPURLResponse {
                 if httpResponse.statusCode == 200 {
-                    logger.info("USDZ uploaded successfully")
+                    logger.info("USDZ uploaded successfully (\(fileSize) bytes)")
                     self?.sendStatusMessage(value: "upload_complete")
                 } else {
-                    logger.error("Upload failed with status: \(httpResponse.statusCode)")
-                    self?.updateStateOnMain(errorMessage: "Upload failed with status: \(httpResponse.statusCode)")
+                    let errorMsg = "Upload failed with status: \(httpResponse.statusCode)"
+                    logger.error(errorMsg)
+                    self?.updateStateOnMain(errorMessage: errorMsg)
                 }
+            } else {
+                logger.error("Invalid HTTP response")
+                self?.updateStateOnMain(errorMessage: "Invalid server response")
             }
             
+            // Clean up temp file after upload
             try? FileManager.default.removeItem(at: fileURL)
         }
         
