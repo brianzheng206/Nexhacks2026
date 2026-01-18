@@ -40,6 +40,23 @@ class ScanController: NSObject, ObservableObject {
     private let frameProcessingQueue = DispatchQueue(label: "com.roomscan.frameProcessing", qos: .userInitiated)
     private let processingLock = NSLock()
     private var _isProcessingFrame = false
+    
+    // Lock for safe access to the latest AR frame
+    private let frameLock = NSLock()
+    private var _currentFrame: ARFrame?
+    private var currentFrame: ARFrame? {
+        get {
+            frameLock.lock()
+            defer { frameLock.unlock() }
+            return _currentFrame
+        }
+        set {
+            frameLock.lock()
+            defer { frameLock.unlock() }
+            _currentFrame = newValue
+        }
+    }
+    
     private var isProcessingFrame: Bool {
         get {
             processingLock.lock()
@@ -646,6 +663,9 @@ extension ScanController: RoomCaptureSessionDelegate {
 
 extension ScanController: ARSessionDelegate {
     func session(_ session: ARSession, didUpdate frame: ARFrame) {
+        // Store the latest frame for mesh coloring
+        self.currentFrame = frame
+        
         // Only process frames when actively scanning to reduce CPU/memory usage
         guard isScanning else { return }
         
@@ -768,7 +788,8 @@ extension ScanController: ARSessionDelegate {
         lastMeshUpdateTime = currentTime
         
         // Limit number of mesh anchors processed per update to prevent memory pressure
-        let maxAnchorsPerUpdate = 5
+        // Increased from 5 to 20 for better coverage
+        let maxAnchorsPerUpdate = 20
         let anchorsToProcess = Array(meshAnchors.prefix(maxAnchorsPerUpdate))
         
         // Process mesh anchors on background queue
@@ -808,7 +829,8 @@ extension ScanController: ARSessionDelegate {
             }
             
             // Limit mesh size to prevent memory issues
-            let maxVertices = 50000
+            // Increased to 100,000 for more detail
+            let maxVertices = 100000
             guard vertexCount <= maxVertices else {
                 logger.debug("Skipping oversized mesh: \(vertexCount) vertices (max: \(maxVertices))")
                 return
@@ -822,16 +844,28 @@ extension ScanController: ARSessionDelegate {
                 return
             }
             
-            var faceClassifications: [Int]?
-            if let classificationSource = geometry.classification {
-                faceClassifications = extractClassifications(from: classificationSource, faceCount: geometry.faces.count)
-            }
+            // Try to use real-world colors from camera frame first
+            // Fallback to semantic colors if frame not available
+            var colors2D: [[Float]]
             
-            let colors2D = generateVertexColors(
-                vertexCount: vertexCount,
-                faces: faces2D,
-                faceClassifications: faceClassifications
-            )
+            if let frame = self.currentFrame {
+                colors2D = generateRealWorldColors(
+                    vertices: vertices2D,
+                    transform: anchorTransform,
+                    frame: frame
+                )
+            } else {
+                var faceClassifications: [Int]?
+                if let classificationSource = geometry.classification {
+                    faceClassifications = extractClassifications(from: classificationSource, faceCount: geometry.faces.count)
+                }
+                
+                colors2D = generateVertexColors(
+                    vertexCount: vertexCount,
+                    faces: faces2D,
+                    faceClassifications: faceClassifications
+                )
+            }
             
             // Check if still scanning before sending
             guard isScanning else { return }
@@ -852,6 +886,90 @@ extension ScanController: ARSessionDelegate {
                 self.sentMeshIdentifiers.insert(anchorIdentifier)
             }
         }
+    }
+    
+    /// Generate real-world colors by projecting vertices onto the camera image
+    private func generateRealWorldColors(
+        vertices: [[Float]],
+        transform: simd_float4x4,
+        frame: ARFrame
+    ) -> [[Float]] {
+        let pixelBuffer = frame.capturedImage
+        
+        // Lock the base address for safe access
+        CVPixelBufferLockBaseAddress(pixelBuffer, .readOnly)
+        defer { CVPixelBufferUnlockBaseAddress(pixelBuffer, .readOnly) }
+        
+        // Ensure we have Y and CbCr planes (bi-planar)
+        guard CVPixelBufferGetPlaneCount(pixelBuffer) >= 2 else {
+            return Array(repeating: [0.5, 0.5, 0.5], count: vertices.count)
+        }
+        
+        guard let baseAddress = CVPixelBufferGetBaseAddressOfPlane(pixelBuffer, 0),
+              let uvBaseAddress = CVPixelBufferGetBaseAddressOfPlane(pixelBuffer, 1) else {
+            return Array(repeating: [0.5, 0.5, 0.5], count: vertices.count)
+        }
+        
+        let width = CVPixelBufferGetWidth(pixelBuffer)
+        let height = CVPixelBufferGetHeight(pixelBuffer)
+        let yBytesPerRow = CVPixelBufferGetBytesPerRowOfPlane(pixelBuffer, 0)
+        let uvBytesPerRow = CVPixelBufferGetBytesPerRowOfPlane(pixelBuffer, 1)
+        
+        let camera = frame.camera
+        
+        // Use .right orientation as capturedImage is usually landscape (native sensor)
+        // Projecting with .right matches the buffer layout (0,0 is top-left of buffer)
+        let orientation: UIInterfaceOrientation = .right
+        let viewportSize = CGSize(width: 1, height: 1) // Normalized coordinates
+        
+        var colors: [[Float]] = []
+        colors.reserveCapacity(vertices.count)
+        
+        for vertex in vertices {
+            // Convert vertex to world space
+            // Vertices are [x, y, z] floats
+            let localVertex = simd_float4(vertex[0], vertex[1], vertex[2], 1)
+            let worldVertex = transform * localVertex
+            let worldPos = simd_float3(worldVertex.x, worldVertex.y, worldVertex.z)
+            
+            // Project to 2D image coordinates (0..1)
+            let projectedPoint = camera.projectPoint(worldPos, orientation: orientation, viewportSize: viewportSize)
+            
+            // Check bounds (0..1)
+            if projectedPoint.x >= 0 && projectedPoint.x < 1 && projectedPoint.y >= 0 && projectedPoint.y < 1 {
+                // Sample color from pixel buffer
+                // projectedPoint x,y maps to pixel coordinates
+                let x = Int(projectedPoint.x * CGFloat(width))
+                let y = Int(projectedPoint.y * CGFloat(height))
+                
+                // Read Y (Luma) - plane 0
+                let yIndex = y * yBytesPerRow + x
+                let yValue = baseAddress.load(fromByteOffset: yIndex, as: UInt8.self)
+                
+                // Read UV (Chroma) - plane 1 - Subsampled 2x2 usually
+                let uvIndex = (y / 2) * uvBytesPerRow + (x / 2) * 2
+                let cbValue = uvBaseAddress.load(fromByteOffset: uvIndex, as: UInt8.self)
+                let crValue = uvBaseAddress.load(fromByteOffset: uvIndex + 1, as: UInt8.self)
+                
+                // Convert YCbCr to RGB
+                // Y is [16, 235], Cb/Cr are [16, 240] usually, or full range [0, 255]
+                // Assuming full range or close approximation
+                let y = Float(yValue)
+                let cb = Float(cbValue) - 128.0
+                let cr = Float(crValue) - 128.0
+                
+                let r = max(0, min(255, y + 1.402 * cr))
+                let g = max(0, min(255, y - 0.344136 * cb - 0.714136 * cr))
+                let b = max(0, min(255, y + 1.772 * cb))
+                
+                colors.append([r / 255.0, g / 255.0, b / 255.0])
+            } else {
+                // Out of view - use a neutral gray
+                colors.append([0.5, 0.5, 0.5])
+            }
+        }
+        
+        return colors
     }
     
     /// Generate per-vertex colors based on face classifications

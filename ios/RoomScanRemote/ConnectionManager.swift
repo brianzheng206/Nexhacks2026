@@ -41,6 +41,17 @@ final class ConnectionManager {
     var onInstruction: ((String) -> Void)?
     var onStatus: ((String) -> Void)?
     
+    // Automatic reconnection
+    private var autoReconnectEnabled: Bool = false
+    private var reconnectTask: Task<Void, Never>?
+    private var reconnectAttempts: Int = 0
+    private let maxReconnectAttempts: Int = 5
+    private let initialReconnectDelay: TimeInterval = 1.0
+    private let maxReconnectDelay: TimeInterval = 30.0
+    private var storedHost: String?
+    private var storedPort: Int = 8080
+    private var storedToken: String?
+    
     init() {
         connectionState = wsClient.isConnected ? .connected : .disconnected
         setupWebSocketCallbacks()
@@ -51,10 +62,34 @@ final class ConnectionManager {
             guard let self = self else { return }
             DispatchQueue.main.async {
                 if isConnected {
-                    self.connectionState = .connected
+                    // Only update to connected if we're in a connecting/connected/reconnecting state
+                    // This prevents race conditions
+                    switch self.connectionState {
+                    case .connecting, .connected, .reconnecting:
+                        self.connectionState = .connected
+                        self.reconnectAttempts = 0
+                        self.cancelAutoReconnect()
+                    case .disconnected, .failed:
+                        // If we're disconnected/failed, don't auto-update to connected
+                        // This prevents stale callbacks from updating state
+                        break
+                    }
                 } else {
-                    if case .connected = self.connectionState {
+                    // Only update to disconnected if we were actually connected
+                    switch self.connectionState {
+                    case .connected, .reconnecting:
                         self.connectionState = .disconnected
+                        // Trigger auto-reconnect if enabled
+                        if self.autoReconnectEnabled {
+                            self.startAutoReconnect()
+                        }
+                    case .connecting:
+                        // If we were connecting and got disconnected, don't change state yet
+                        // Let the completion handler handle it
+                        break
+                    case .disconnected, .failed:
+                        // Already disconnected, no change needed
+                        break
                     }
                 }
             }
@@ -95,6 +130,14 @@ final class ConnectionManager {
     }
     
     func connect(laptopHost: String, port: Int = 8080, token: String, completion: @escaping (Bool, String?) -> Void) {
+        // Store connection parameters for auto-reconnect
+        storedHost = laptopHost
+        storedPort = port
+        storedToken = token
+        
+        // Cancel any ongoing auto-reconnect
+        cancelAutoReconnect()
+        
         // Update state to connecting on main thread
         DispatchQueue.main.async { [weak self] in
             self?.connectionState = .connecting
@@ -110,6 +153,7 @@ final class ConnectionManager {
                 
                 if success {
                     self.connectionState = .connected
+                    self.reconnectAttempts = 0
                     // Reset quality tracking on successful connection
                     self.frameSendTimes.removeAll()
                     self.lastQualityCheck = Date()
@@ -131,11 +175,16 @@ final class ConnectionManager {
     }
     
     func disconnect() {
+        autoReconnectEnabled = false
+        cancelAutoReconnect()
         wsClient.disconnect()
         Task { @MainActor in
             connectionState = .disconnected
             frameSendTimes.removeAll()
             // Keep data counters for display until next connection
+            storedHost = nil
+            storedPort = 8080
+            storedToken = nil
         }
     }
     
@@ -144,6 +193,67 @@ final class ConnectionManager {
             self?.connectionState = .reconnecting
         }
         connect(laptopHost: laptopHost, port: port, token: token, completion: completion)
+    }
+    
+    func enableAutoReconnect() {
+        autoReconnectEnabled = true
+    }
+    
+    func disableAutoReconnect() {
+        autoReconnectEnabled = false
+        cancelAutoReconnect()
+    }
+    
+    private func startAutoReconnect() {
+        guard autoReconnectEnabled else { return }
+        guard let host = storedHost, let token = storedToken else { return }
+        guard reconnectAttempts < maxReconnectAttempts else {
+            DispatchQueue.main.async { [weak self] in
+                self?.connectionState = .failed("Reconnection failed after \(self?.maxReconnectAttempts ?? 5) attempts")
+            }
+            return
+        }
+        
+        cancelAutoReconnect()
+        
+        reconnectAttempts += 1
+        let delay = min(initialReconnectDelay * pow(2.0, Double(reconnectAttempts - 1)), maxReconnectDelay)
+        
+        DispatchQueue.main.async { [weak self] in
+            self?.connectionState = .reconnecting
+        }
+        
+        reconnectTask = Task { [weak self] in
+            do {
+                try await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+            } catch {
+                // Task was cancelled
+                return
+            }
+            
+            guard let self = self else { return }
+            
+            self.wsClient.connect(laptopHost: host, port: self.storedPort, token: token) { [weak self] success, error in
+                DispatchQueue.main.async {
+                    guard let self = self else { return }
+                    
+                    if success {
+                        self.connectionState = .connected
+                        self.reconnectAttempts = 0
+                    } else {
+                        // Will trigger another reconnect attempt via onConnectionStateChanged
+                        if self.reconnectAttempts >= self.maxReconnectAttempts {
+                            self.connectionState = .failed(error ?? "Reconnection failed")
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    private func cancelAutoReconnect() {
+        reconnectTask?.cancel()
+        reconnectTask = nil
     }
     
     func sendMessage(_ jsonString: String) {

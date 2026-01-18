@@ -29,14 +29,24 @@ class WSClient {
     private var helloCompletion: ((Bool, String?) -> Void)?
     private var isWaitingForHelloAck: Bool = false
     
+    // Connection state management
+    private let connectionLock = NSLock()
+    private var isConnecting: Bool = false
+    private var shouldReceiveMessages: Bool = false
+    
     private var connectionTimeoutTimer: Timer?
     private var helloAckTimeoutTimer: Timer?
+    private var keepaliveTimer: Timer?
     private let connectionTimeout: TimeInterval = 10.0
     private let helloAckTimeout: TimeInterval = 5.0
+    private let keepaliveInterval: TimeInterval = 20.0
     
     private init() {}
     
     func connect(laptopHost: String, port: Int = 8080, token: String, completion: @escaping (Bool, String?) -> Void) {
+        connectionLock.lock()
+        defer { connectionLock.unlock() }
+        
         logger.info("========== CONNECT CALLED ==========")
         logger.info("Host: \(laptopHost), Port: \(port), Token length: \(token.count)")
         
@@ -45,7 +55,9 @@ class WSClient {
         
         guard !trimmedHost.isEmpty else {
             logger.error("Invalid server address - empty host")
-            completion(false, "Invalid server address")
+            DispatchQueue.main.async {
+                completion(false, "Invalid server address")
+            }
             return
         }
         
@@ -60,17 +72,27 @@ class WSClient {
             }
             return
         }
+        
+        // Prevent multiple simultaneous connection attempts
+        if isConnecting {
+            logger.warn("Connection already in progress - queuing completion")
+            let existingCompletion = helloCompletion
+            helloCompletion = { success, error in
+                existingCompletion?(success, error)
+                completion(success, error)
+            }
+            return
+        }
+        
+        isConnecting = true
 
         logger.debug("Cancelling any existing timers...")
-        connectionTimeoutTimer?.invalidate()
-        helloAckTimeoutTimer?.invalidate()
-        connectionTimeoutTimer = nil
-        helloAckTimeoutTimer = nil
+        cleanupTimers()
         
         // Disconnect existing connection if credentials changed
         if currentHost != nil || currentPort != nil || currentToken != nil {
             logger.debug("Disconnecting existing connection (credentials changed)...")
-            disconnectInternal(clearCompletion: false)
+            disconnectInternal(clearCompletion: false, releaseLock: false)
         }
 
         currentHost = trimmedHost
@@ -78,13 +100,17 @@ class WSClient {
         currentToken = trimmedToken
         helloCompletion = completion
         isWaitingForHelloAck = false
+        shouldReceiveMessages = false
         
         let urlString = "ws://\(trimmedHost):\(port)"
         logger.info("WebSocket URL: \(urlString)")
         
         guard let url = URL(string: urlString) else {
             logger.error("Invalid WebSocket URL: \(urlString)")
-            completion(false, "Invalid WebSocket URL")
+            isConnecting = false
+            DispatchQueue.main.async {
+                completion(false, "Invalid WebSocket URL")
+            }
             return
         }
         
@@ -93,6 +119,7 @@ class WSClient {
         urlSession = session
         
         logger.info("Created URLSession and WebSocketTask")
+        shouldReceiveMessages = true
         logger.info(">>> Setting up receiveMessages() BEFORE resume()")
         receiveMessages()
         logger.info(">>> Calling webSocketTask.resume()...")
@@ -100,36 +127,53 @@ class WSClient {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
             guard let self = self else { return }
             logger.info(">>> Sending hello after 0.2s delay...")
-            self.sendHello(token: token)
+            self.sendHello(token: trimmedToken)
         }
         
         logger.debug("Setting hello_ack timeout timer: \(helloAckTimeout)s")
         helloAckTimeoutTimer = Timer.scheduledTimer(withTimeInterval: helloAckTimeout, repeats: false) { [weak self] _ in
-            guard let self = self, self.isWaitingForHelloAck else { return }
+            guard let self = self else { return }
+            self.connectionLock.lock()
+            defer { self.connectionLock.unlock() }
+            
+            guard self.isWaitingForHelloAck else { return }
             logger.error(">>> HELLO_ACK TIMEOUT - no response after \(self.helloAckTimeout) seconds")
             self.isWaitingForHelloAck = false
-            self.helloAckTimeoutTimer = nil
-            self.helloCompletion?(false, "Connection timeout - server may be unreachable or token invalid")
+            self.isConnecting = false
+            self.cleanupTimers()
+            let completion = self.helloCompletion
             self.helloCompletion = nil
+            DispatchQueue.main.async {
+                completion?(false, "Connection timeout - server may be unreachable or token invalid")
+            }
         }
         
         logger.debug("Setting connection timeout timer: \(connectionTimeout)s")
         connectionTimeoutTimer = Timer.scheduledTimer(withTimeInterval: connectionTimeout, repeats: false) { [weak self] _ in
             guard let self = self else { return }
+            self.connectionLock.lock()
+            defer { self.connectionLock.unlock() }
+            
             if !self.isConnected && self.helloCompletion != nil {
                 logger.error(">>> CONNECTION TIMEOUT - failed after \(self.connectionTimeout) seconds")
-                self.connectionTimeoutTimer = nil
-                self.helloAckTimeoutTimer?.invalidate()
-                self.helloAckTimeoutTimer = nil
-                self.isWaitingForHelloAck = false
-                self.helloCompletion?(false, "Connection timeout - unable to reach server")
+                self.isConnecting = false
+                self.cleanupTimers()
+                let completion = self.helloCompletion
                 self.helloCompletion = nil
-                self.disconnect()
+                self.disconnectInternal(clearCompletion: false, releaseLock: false)
+                DispatchQueue.main.async {
+                    completion?(false, "Connection timeout - unable to reach server")
+                }
             }
         }
     }
     
     private func sendHello(token: String) {
+        connectionLock.lock()
+        let task = webSocketTask
+        let completion = helloCompletion
+        connectionLock.unlock()
+        
         logger.info("========== SEND HELLO ==========")
         
         let trimmedToken = token.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -138,10 +182,29 @@ class WSClient {
         
         guard !trimmedToken.isEmpty else {
             logger.error("Token validation failed - token is empty after trimming")
-            helloCompletion?(false, "Invalid authentication. Please check your session token.")
+            connectionLock.lock()
+            cleanupTimers()
+            isConnecting = false
+            let completion = helloCompletion
             helloCompletion = nil
-            connectionTimeoutTimer?.invalidate()
-            connectionTimeoutTimer = nil
+            connectionLock.unlock()
+            DispatchQueue.main.async {
+                completion?(false, "Invalid authentication. Please check your session token.")
+            }
+            return
+        }
+        
+        guard let task = task else {
+            logger.error("Cannot send hello - webSocketTask is nil")
+            connectionLock.lock()
+            cleanupTimers()
+            isConnecting = false
+            let completion = helloCompletion
+            helloCompletion = nil
+            connectionLock.unlock()
+            DispatchQueue.main.async {
+                completion?(false, "Connection not established")
+            }
             return
         }
         
@@ -154,18 +217,26 @@ class WSClient {
         guard let jsonData = try? JSONSerialization.data(withJSONObject: helloMessage),
               let jsonString = String(data: jsonData, encoding: .utf8) else {
             logger.error("Failed to create hello message JSON")
-            helloCompletion?(false, "Failed to create hello message")
+            connectionLock.lock()
+            cleanupTimers()
+            isConnecting = false
+            let completion = helloCompletion
             helloCompletion = nil
-            connectionTimeoutTimer?.invalidate()
-            connectionTimeoutTimer = nil
+            connectionLock.unlock()
+            DispatchQueue.main.async {
+                completion?(false, "Failed to create hello message")
+            }
             return
         }
         
         logger.info("Sending hello message: \(jsonString.prefix(100))...")
         
         let message = URLSessionWebSocketTask.Message.string(jsonString)
-        webSocketTask?.send(message) { [weak self] error in
+        task.send(message) { [weak self] error in
             guard let self = self else { return }
+            
+            self.connectionLock.lock()
+            defer { self.connectionLock.unlock() }
             
             if let error = error {
                 logger.error(">>> HELLO SEND FAILED: \(error.localizedDescription)")
@@ -188,10 +259,13 @@ class WSClient {
                 } else {
                     errorMsg = "Failed to send hello: \(error.localizedDescription)"
                 }
-                self.connectionTimeoutTimer?.invalidate()
-                self.connectionTimeoutTimer = nil
-                self.helloCompletion?(false, errorMsg)
+                self.cleanupTimers()
+                self.isConnecting = false
+                let completion = self.helloCompletion
                 self.helloCompletion = nil
+                DispatchQueue.main.async {
+                    completion?(false, errorMsg)
+                }
             } else {
                 logger.info(">>> HELLO SENT SUCCESSFULLY - waiting for hello_ack...")
                 self.isWaitingForHelloAck = true
@@ -200,18 +274,30 @@ class WSClient {
     }
     
     private func receiveMessages() {
-        logger.debug(">>> receiveMessages() called")
+        connectionLock.lock()
+        let shouldReceive = shouldReceiveMessages
+        let task = webSocketTask
+        connectionLock.unlock()
         
-        guard let task = webSocketTask else {
-            logger.error("Cannot receive messages: webSocketTask is nil")
+        guard shouldReceive, let task = task else {
+            logger.debug(">>> receiveMessages() - not receiving (shouldReceive: \(shouldReceive), task: \(task != nil))")
             return
         }
         
-        logger.debug("Setting up receive handler...")
+        logger.debug(">>> receiveMessages() called")
         
         task.receive { [weak self] result in
             guard let self = self else {
                 logger.debug("receiveMessages callback - self is nil")
+                return
+            }
+            
+            self.connectionLock.lock()
+            let shouldContinue = self.shouldReceiveMessages
+            self.connectionLock.unlock()
+            
+            guard shouldContinue else {
+                logger.debug(">>> receiveMessages() - stopped receiving")
                 return
             }
             
@@ -228,11 +314,27 @@ class WSClient {
                     logger.debug(">>> RECEIVED UNKNOWN MESSAGE TYPE")
                 }
                 
+                // Continue receiving messages
                 self.receiveMessages()
                 
             case .failure(let error):
                 logger.error(">>> RECEIVE ERROR: \(error.localizedDescription)")
-                if self.isConnected || self.helloCompletion != nil {
+                
+                // Check if this is a normal close vs an error
+                if let urlError = error as? URLError {
+                    // Some errors are expected (like connection closed)
+                    if urlError.code == .networkConnectionLost || urlError.code == .timedOut {
+                        logger.debug("Network error detected - handling disconnection")
+                    }
+                }
+                
+                // Only handle disconnection if we were connected or connecting
+                self.connectionLock.lock()
+                let wasConnected = self.isConnected
+                let wasConnecting = self.isConnecting || self.helloCompletion != nil
+                self.connectionLock.unlock()
+                
+                if wasConnected || wasConnecting {
                     self.handleDisconnection()
                 }
             }
@@ -256,24 +358,29 @@ class WSClient {
             logger.info("========== HELLO_ACK RECEIVED ==========")
             logger.info("Connection SUCCESSFUL!")
             
+            connectionLock.lock()
             isWaitingForHelloAck = false
+            isConnecting = false
             
             // Cancel timers on successful connection
             logger.debug("Cancelling timers...")
-            connectionTimeoutTimer?.invalidate()
-            connectionTimeoutTimer = nil
-            helloAckTimeoutTimer?.invalidate()
-            helloAckTimeoutTimer = nil
+            cleanupTimers()
             
             logger.debug("Updating connection state to true...")
             updateConnectionState(true)
             
             logger.debug("Calling onConnectionStateChanged callback...")
-            onConnectionStateChanged?(true)
-            
-            logger.debug("Calling helloCompletion callback...")
+            let stateCallback = onConnectionStateChanged
             let completion = helloCompletion
             helloCompletion = nil
+            connectionLock.unlock()
+            
+            // Start keepalive timer
+            startKeepalive()
+            
+            stateCallback?(true)
+            
+            logger.debug("Calling helloCompletion callback...")
             DispatchQueue.main.async {
                 completion?(true, nil)
             }
@@ -356,31 +463,55 @@ class WSClient {
     }
     
     private func handleDisconnection() {
+        connectionLock.lock()
+        defer { connectionLock.unlock() }
+        
         logger.info(">>> handleDisconnection called")
         
-        connectionTimeoutTimer?.invalidate()
-        connectionTimeoutTimer = nil
-        helloAckTimeoutTimer?.invalidate()
-        helloAckTimeoutTimer = nil
+        // Only handle if we were actually connected or connecting
+        guard isConnected || isConnecting || helloCompletion != nil else {
+            logger.debug(">>> handleDisconnection - already disconnected, ignoring")
+            return
+        }
+        
+        cleanupTimers()
+        shouldReceiveMessages = false
         
         updateConnectionState(false)
-        onConnectionStateChanged?(false)
+        let stateCallback = onConnectionStateChanged
         
         // If we have a pending completion, call it with failure
-        if let completion = helloCompletion {
+        let completion = helloCompletion
+        helloCompletion = nil
+        isConnecting = false
+        
+        connectionLock.unlock()
+        
+        stateCallback?(false)
+        
+        if let completion = completion {
             logger.debug("Calling pending helloCompletion with failure")
-            helloCompletion = nil
             DispatchQueue.main.async {
                 completion(false, "Connection lost")
             }
         }
     }
     
-    private func disconnectInternal(clearCompletion: Bool) {
-        connectionTimeoutTimer?.invalidate()
-        connectionTimeoutTimer = nil
-        helloAckTimeoutTimer?.invalidate()
-        helloAckTimeoutTimer = nil
+    private func disconnectInternal(clearCompletion: Bool, releaseLock: Bool = true) {
+        if releaseLock {
+            connectionLock.lock()
+        }
+        defer {
+            if releaseLock {
+                connectionLock.unlock()
+            }
+        }
+        
+        logger.info(">>> disconnectInternal called (clearCompletion: \(clearCompletion))")
+        
+        cleanupTimers()
+        shouldReceiveMessages = false
+        isConnecting = false
         
         webSocketTask?.cancel(with: .goingAway, reason: nil)
         webSocketTask = nil
@@ -399,9 +530,52 @@ class WSClient {
     }
     
     func disconnect() {
+        connectionLock.lock()
+        defer { connectionLock.unlock() }
+        
         logger.info(">>> disconnect() called")
-        disconnectInternal(clearCompletion: true)
-        onConnectionStateChanged?(false)
+        disconnectInternal(clearCompletion: true, releaseLock: false)
+        let stateCallback = onConnectionStateChanged
+        connectionLock.unlock()
+        
+        stateCallback?(false)
+    }
+    
+    private func cleanupTimers() {
+        connectionTimeoutTimer?.invalidate()
+        connectionTimeoutTimer = nil
+        helloAckTimeoutTimer?.invalidate()
+        helloAckTimeoutTimer = nil
+        keepaliveTimer?.invalidate()
+        keepaliveTimer = nil
+    }
+    
+    private func startKeepalive() {
+        cleanupTimers()
+        
+        keepaliveTimer = Timer.scheduledTimer(withTimeInterval: keepaliveInterval, repeats: true) { [weak self] _ in
+            guard let self = self else { return }
+            
+            self.connectionLock.lock()
+            let connected = self.isConnected
+            let task = self.webSocketTask
+            self.connectionLock.unlock()
+            
+            guard connected, let task = task else {
+                self.cleanupTimers()
+                return
+            }
+            
+            // Send ping to keep connection alive
+            task.sendPing { [weak self] error in
+                if let error = error {
+                    logger.error("Keepalive ping failed: \(error.localizedDescription)")
+                    self?.handleDisconnection()
+                } else {
+                    logger.debug("Keepalive ping successful")
+                }
+            }
+        }
     }
     
     private func updateConnectionState(_ newState: Bool) {

@@ -136,6 +136,9 @@ struct ScanView: View {
             
             setupWebSocketHandlers()
             
+            // Enable automatic reconnection for better reliability
+            connectionManager.enableAutoReconnect()
+            
             // Ensure connection is established - reconnect if needed
             if !connectionManager.isConnected {
                 connectionManager.connect(laptopHost: serverHost, port: serverPort, token: token) { success, error in
@@ -362,6 +365,8 @@ struct ScanView: View {
             scanController.stopScan()
         }
         
+        // Disable auto-reconnect before disconnecting
+        connectionManager.disableAutoReconnect()
         connectionManager.disconnect()
     }
     
