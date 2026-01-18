@@ -29,6 +29,8 @@ struct PairingView: View {
     @State private var isTokenValid: Bool = true
     @State private var serverAddressValidationMessage: String = ""
     @State private var tokenValidationMessage: String = ""
+    @State private var hasAttemptedAutoConnect: Bool = false
+    @State private var autoConnectDebounceTask: DispatchWorkItem?
     
     var body: some View {
         NavigationStack {
@@ -109,13 +111,13 @@ struct PairingView: View {
             .sheet(isPresented: $showQRScanner) {
                 QRScannerView(scannedToken: $scannedToken, scannedHost: $scannedHost, scannedPort: $scannedPort)
             }
-            .onChange(of: scannedToken) { _ in
+            .onChange(of: scannedToken) { _, _ in
                 applyScannedValues()
             }
-            .onChange(of: scannedHost) { _ in
+            .onChange(of: scannedHost) { _, _ in
                 applyScannedValues()
             }
-            .onChange(of: scannedPort) { _ in
+            .onChange(of: scannedPort) { _, _ in
                 applyScannedValues()
             }
         }
@@ -216,8 +218,16 @@ struct PairingView: View {
             return
         }
         
+        // Prevent multiple simultaneous connection attempts
+        guard !isConnecting else {
+            return
+        }
+        
         isConnecting = true
         errorMessage = nil
+        
+        // Reset auto-connect flag when manually connecting
+        hasAttemptedAutoConnect = false
         
         guard let parsed = parseServerAddress(serverAddress) else {
             errorMessage = "Invalid server address. Use host or host:port."
@@ -325,6 +335,12 @@ struct PairingView: View {
     }
 
     private func attemptAutoConnect() {
+        // Prevent multiple connection attempts
+        guard !isConnecting, !hasAttemptedAutoConnect else {
+            return
+        }
+        
+        hasAttemptedAutoConnect = true
         guard !isConnecting, !navigateToScan else { return }
         guard !serverAddress.isEmpty, !token.isEmpty else { return }
         connect()

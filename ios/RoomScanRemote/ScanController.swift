@@ -1,15 +1,16 @@
 //  ScanController.swift
 //  RoomScanRemote
 //
-//  Controller for RoomPlan scanning
+//  Controller for RoomPlan scanning with detailed mesh capture
 //
 //  Requirements:
-//  - iOS 16.0+ (RoomPlan framework requirement)
-//  - Device with LiDAR or TrueDepth camera (RoomPlan hardware requirement)
+//  - iOS 17.0+ (RoomCaptureSession with custom ARSession)
+//  - Device with LiDAR scanner (required for mesh reconstruction)
 //
-//  Note: This app uses RoomPlan's structured room data (walls, doors, windows, objects)
-//  via RoomCaptureSessionDelegate callbacks. Raw ARKit mesh streaming is not used,
-//  as RoomPlan provides better structured data for room reconstruction.
+//  Features:
+//  - RoomPlan structured room data (walls, doors, windows, objects)
+//  - ARKit mesh anchors for detailed 3D geometry (vertices, faces, normals, classifications)
+//  - Combined scanning for both parametric and detailed mesh data
 //
 
 import Foundation
@@ -20,6 +21,7 @@ import CoreImage
 import CoreVideo
 import ImageIO
 import UIKit
+import Metal
 
 private let logger = AppLogger.scanning
 private let frameLogger = AppLogger.frameProcessing
@@ -132,6 +134,25 @@ class ScanController: NSObject, ObservableObject {
     }
     var connectionManager: ConnectionManager?
     
+    // MARK: - Mesh Reconstruction Properties
+    
+    // Custom ARSession for mesh capture (iOS 17+)
+    private var customARSession: ARSession?
+    
+    // Track mesh anchors for streaming detailed geometry
+    private var lastMeshUpdateTime: TimeInterval = 0
+    private let meshUpdateInterval: TimeInterval = 0.5 // 2Hz for mesh updates (more data)
+    
+    // Mesh processing queue (separate from frame processing)
+    private let meshProcessingQueue = DispatchQueue(label: "com.roomscan.meshProcessing", qos: .userInitiated)
+    
+    // Track which mesh anchors we've already sent (to only send updates)
+    private var sentMeshIdentifiers = Set<UUID>()
+    
+    // Mesh streaming statistics
+    private var totalMeshesSent: Int = 0
+    private var totalVerticesSent: Int = 0
+    
     // MARK: - Thread-Safe State Updates
     
     /// Helper method to update @Published properties on main thread
@@ -203,26 +224,76 @@ class ScanController: NSObject, ObservableObject {
             return
         }
         
-        // ScanController always creates and owns its own session
-        // If a session already exists, clean it up first to prevent duplicate delegates
-        if let existingSession = roomCaptureSession {
-            // Clear delegates before stopping to prevent any callbacks during cleanup
-            existingSession.arSession.delegate = nil
-            existingSession.delegate = nil
-            // Stop the session (safe to call even if already stopped)
-            existingSession.stop()
+        // Check if mesh reconstruction is supported (requires LiDAR)
+        let meshSupported = ARWorldTrackingConfiguration.supportsSceneReconstruction(.meshWithClassification)
+        logger.info("Mesh reconstruction supported: \(meshSupported)")
+        
+        // Create and configure custom ARSession with mesh reconstruction (iOS 17+)
+        let arSession = ARSession()
+        let arConfig = ARWorldTrackingConfiguration()
+        arConfig.planeDetection = [.horizontal, .vertical]
+        
+        // Enable mesh reconstruction if supported (provides detailed geometry)
+        if meshSupported {
+            arConfig.sceneReconstruction = .meshWithClassification
+            logger.info("Enabled mesh reconstruction with classification")
+        } else {
+            logger.info("Mesh reconstruction not supported - using RoomPlan parametric data only")
         }
         
-        // Create new session - ScanController is the single source of truth
-        // Delegate assignment happens only once here, ensuring no duplicates
-        let session = RoomCaptureSession()
-        session.delegate = self
-        session.arSession.delegate = self
+        // Store reference to custom ARSession
+        customARSession = arSession
+        arSession.delegate = self
         
-        // Update session on main thread (thread-safe)
-        updateStateOnMain(roomCaptureSession: session)
+        // Use existing session if available (from RoomCaptureView), otherwise create new one with custom ARSession
+        let session: RoomCaptureSession
         
-        logger.info("Created new RoomCaptureSession - ScanController owns this session")
+        if let existingSession = roomCaptureSession {
+            // Use existing session (likely from RoomCaptureView)
+            session = existingSession
+            
+            // Ensure delegates are set
+            if session.delegate !== self {
+                session.delegate = self
+            }
+            if session.arSession.delegate !== self {
+                session.arSession.delegate = self
+            }
+            
+            logger.info("Using existing RoomCaptureSession from RoomCaptureView")
+            
+            // Note: When using RoomCaptureView's session, we can't use custom ARSession config
+            // But we can still access mesh anchors if the device supports it
+        } else {
+            // Create new session with custom ARSession (iOS 17+ API)
+            logger.info("Creating new RoomCaptureSession with custom ARSession for mesh capture")
+            
+            // Clear any existing session first
+            if let oldSession = roomCaptureSession {
+                oldSession.arSession.delegate = nil
+                oldSession.delegate = nil
+                oldSession.stop()
+            }
+            
+            // iOS 17+: Initialize RoomCaptureSession with custom ARSession
+            // This enables mesh reconstruction while using RoomPlan
+            if #available(iOS 17.0, *) {
+                session = RoomCaptureSession(arSession: arSession)
+                logger.info("Created RoomCaptureSession with custom ARSession (iOS 17+)")
+            } else {
+                // Fallback for iOS 16: Use default session (no custom mesh support)
+                session = RoomCaptureSession()
+                logger.info("Fallback: Created default RoomCaptureSession (iOS 16)")
+            }
+            
+            session.delegate = self
+            session.arSession.delegate = self
+            
+            // Update session on main thread (thread-safe)
+            updateStateOnMain(roomCaptureSession: session)
+            
+            logger.info("Created new RoomCaptureSession - ScanController owns this session")
+        }
         
         // Configure RoomPlan
         let configuration = RoomCaptureSession.Configuration()
@@ -242,6 +313,12 @@ class ScanController: NSObject, ObservableObject {
         isProcessingFrame = false
         frameTimestamps.removeAll()
         
+        // Reset mesh tracking
+        sentMeshIdentifiers.removeAll()
+        totalMeshesSent = 0
+        totalVerticesSent = 0
+        lastMeshUpdateTime = 0
+        
         // Ensure CIContext is ready before scanning starts
         frameProcessingQueue.async { [weak self] in
             guard let self = self else { return }
@@ -252,7 +329,7 @@ class ScanController: NSObject, ObservableObject {
         }
         
         sendStatusMessage(value: "scan_started")
-        logger.info("Scan started - frame rate: \(1.0/frameInterval) fps")
+        logger.info("Scan started - frame rate: \(1.0/frameInterval) fps, mesh enabled: \(meshSupported)")
     }
     
     func stopScan() {
@@ -261,13 +338,16 @@ class ScanController: NSObject, ObservableObject {
         // Clean up session - clear delegates first to prevent callbacks during cleanup
         // Then stop the session, then nil the reference
         if let session = roomCaptureSession {
-            // Clear delegates first (order matters for cleanup)
-            session.arSession.delegate = nil
-            session.delegate = nil
-            // Stop the session (safe to call even if already stopped)
+            // Stop the session but keep it alive for RoomCaptureView to continue showing camera feed
+            // Don't clear delegates or nil the session - RoomCaptureView may still need it
+            // The session will be cleaned up when the view is deallocated
             session.stop()
-            logger.info("Stopped and cleaned up RoomCaptureSession")
+            logger.info("Stopped RoomCaptureSession (keeping for camera feed display)")
         }
+        
+        // Clean up custom ARSession
+        customARSession?.pause()
+        customARSession = nil
         
         // Update state on main thread (thread-safe)
         updateStateOnMain(isScanning: false, roomCaptureSession: nil)
@@ -275,7 +355,12 @@ class ScanController: NSObject, ObservableObject {
         // Log final statistics
         if totalFramesProcessed > 0 || totalFramesDropped > 0 {
             let dropRate = Double(totalFramesDropped) / Double(totalFramesProcessed + totalFramesDropped) * 100.0
-            logger.info("Scan stopped - Final Statistics: Processed: \(totalFramesProcessed), Dropped: \(totalFramesDropped), Drop Rate: \(String(format: "%.1f", dropRate))%")
+            logger.info("Scan stopped - Frame Statistics: Processed: \(totalFramesProcessed), Dropped: \(totalFramesDropped), Drop Rate: \(String(format: "%.1f", dropRate))%")
+        }
+        
+        // Log mesh statistics
+        if totalMeshesSent > 0 {
+            logger.info("Scan stopped - Mesh Statistics: Meshes sent: \(totalMeshesSent), Vertices sent: \(totalVerticesSent)")
         }
         
         // Reset processing flag
@@ -337,57 +422,18 @@ class ScanController: NSObject, ObservableObject {
             "objects": capturedRoom.objects.count
         ]
         
-        // Extract wall geometry
-        var walls: [[String: Any]] = []
-        for wall in capturedRoom.walls {
-            var wallData: [String: Any] = [
-                "identifier": wall.identifier.uuidString
-            ]
-            
-            // Flatten 4x4 transform matrix (16 floats, column-major)
-            let transform = wall.transform
-            var transformArray: [Float] = []
-            // Column 0
-            transformArray.append(transform.columns.0.x)
-            transformArray.append(transform.columns.0.y)
-            transformArray.append(transform.columns.0.z)
-            transformArray.append(transform.columns.0.w)
-            // Column 1
-            transformArray.append(transform.columns.1.x)
-            transformArray.append(transform.columns.1.y)
-            transformArray.append(transform.columns.1.z)
-            transformArray.append(transform.columns.1.w)
-            // Column 2
-            transformArray.append(transform.columns.2.x)
-            transformArray.append(transform.columns.2.y)
-            transformArray.append(transform.columns.2.z)
-            transformArray.append(transform.columns.2.w)
-            // Column 3 (translation)
-            transformArray.append(transform.columns.3.x)
-            transformArray.append(transform.columns.3.y)
-            transformArray.append(transform.columns.3.z)
-            transformArray.append(transform.columns.3.w)
-            wallData["transform"] = transformArray
-            
-            // Dimensions
-            wallData["dimensions"] = [
-                "width": wall.dimensions.x,
-                "height": wall.dimensions.y,
-                "length": wall.dimensions.z
-            ]
-            
-            // polygonCorners if available (check if wall has edge information)
-            // Note: RoomPlan Surfaces don't directly expose polygonCorners
-            // We'll leave this empty for now and handle it if available in future API versions
-            // wallData["polygonCorners"] = [] // Placeholder
-            
-            walls.append(wallData)
-        }
+        let walls = capturedRoom.walls.map { serializeSurface($0) }
+        let doors = capturedRoom.doors.map { serializeSurface($0) }
+        let windows = capturedRoom.windows.map { serializeSurface($0) }
+        let objects = capturedRoom.objects.map { serializeObject($0) }
         
         let message: [String: Any] = [
             "type": "room_update",
             "stats": stats,
             "walls": walls,
+            "doors": doors,
+            "windows": windows,
+            "objects": objects,
             "t": Int(currentTime),
             "token": token
         ]
@@ -418,6 +464,40 @@ class ScanController: NSObject, ObservableObject {
             }
             wsClient.sendMessage(jsonString)
         }
+    }
+
+    private func serializeSurface(_ surface: CapturedRoom.Surface) -> [String: Any] {
+        return [
+            "identifier": surface.identifier.uuidString,
+            "transform": flattenTransform(surface.transform),
+            "dimensions": [
+                "width": surface.dimensions.x,
+                "height": surface.dimensions.y,
+                "length": surface.dimensions.z
+            ]
+        ]
+    }
+
+    private func serializeObject(_ object: CapturedRoom.Object) -> [String: Any] {
+        return [
+            "identifier": object.identifier.uuidString,
+            "category": String(describing: object.category),
+            "transform": flattenTransform(object.transform),
+            "dimensions": [
+                "width": object.dimensions.x,
+                "height": object.dimensions.y,
+                "length": object.dimensions.z
+            ]
+        ]
+    }
+
+    private func flattenTransform(_ transform: simd_float4x4) -> [Float] {
+        return [
+            transform.columns.0.x, transform.columns.0.y, transform.columns.0.z, transform.columns.0.w,
+            transform.columns.1.x, transform.columns.1.y, transform.columns.1.z, transform.columns.1.w,
+            transform.columns.2.x, transform.columns.2.y, transform.columns.2.z, transform.columns.2.w,
+            transform.columns.3.x, transform.columns.3.y, transform.columns.3.z, transform.columns.3.w
+        ]
     }
     
     // Export USDZ file
@@ -578,10 +658,11 @@ extension ScanController: RoomCaptureSessionDelegate {
 // MARK: - ARSessionDelegate
 
 extension ScanController: ARSessionDelegate {
-    // Note: We only need didUpdate frame for JPEG preview streaming.
-    // RoomPlan handles room reconstruction through RoomCaptureSessionDelegate,
-    // which provides structured data (walls, doors, windows, objects) via room_update messages.
-    // Raw ARKit mesh anchors are not needed for this use case.
+    // ARSessionDelegate handles:
+    // 1. didUpdate frame - for JPEG preview streaming
+    // 2. didAdd/didUpdate anchors - for mesh anchor capture (detailed 3D geometry)
+    // RoomPlan provides structured data (walls, doors, windows, objects) via RoomCaptureSessionDelegate
+    // ARKit mesh anchors provide detailed mesh geometry (vertices, faces, normals, classifications)
     
     func session(_ session: ARSession, didUpdate frame: ARFrame) {
         // Check connection status
@@ -683,6 +764,232 @@ extension ScanController: ARSessionDelegate {
                 self.logStatisticsIfNeeded()
             }
         }
+    }
+    
+    // MARK: - Mesh Anchor Handling
+    
+    /// Called when new anchors are added to the session (including mesh anchors)
+    func session(_ session: ARSession, didAdd anchors: [ARAnchor]) {
+        processMeshAnchors(anchors)
+    }
+    
+    /// Called when existing anchors are updated (mesh geometry changes)
+    func session(_ session: ARSession, didUpdate anchors: [ARAnchor]) {
+        processMeshAnchors(anchors)
+    }
+    
+    /// Process mesh anchors and stream their geometry to the server
+    private func processMeshAnchors(_ anchors: [ARAnchor]) {
+        guard isScanning else { return }
+        
+        // Throttle mesh updates to avoid flooding the network
+        let currentTime = Date().timeIntervalSince1970
+        guard currentTime - lastMeshUpdateTime >= meshUpdateInterval else { return }
+        
+        // Filter for mesh anchors only
+        let meshAnchors = anchors.compactMap { $0 as? ARMeshAnchor }
+        guard !meshAnchors.isEmpty else { return }
+        
+        lastMeshUpdateTime = currentTime
+        
+        // Process mesh anchors on background queue
+        meshProcessingQueue.async { [weak self] in
+            guard let self = self else { return }
+            
+            for meshAnchor in meshAnchors {
+                self.processMeshAnchor(meshAnchor)
+            }
+        }
+    }
+    
+    /// Process a single mesh anchor and send its geometry
+    private func processMeshAnchor(_ meshAnchor: ARMeshAnchor) {
+        let geometry = meshAnchor.geometry
+        
+        // Extract vertices as 2D array [[x,y,z], [x,y,z], ...]
+        let vertices2D = extractVertices2D(from: geometry.vertices)
+        let vertexCount = vertices2D.count
+        
+        // Extract face indices as 2D array [[i,j,k], [i,j,k], ...]
+        let faces2D = extractFaces2D(from: geometry.faces)
+        
+        // Extract classifications if available (per-face)
+        var faceClassifications: [Int]?
+        if let classificationSource = geometry.classification {
+            faceClassifications = extractClassifications(from: classificationSource, faceCount: geometry.faces.count)
+        }
+        
+        // Generate per-vertex colors (server expects colors per vertex, not per face)
+        let colors2D = generateVertexColors(
+            vertexCount: vertexCount,
+            faces: faces2D,
+            faceClassifications: faceClassifications
+        )
+        
+        // Send mesh data in server-expected format
+        sendMeshUpdate(
+            identifier: meshAnchor.identifier,
+            transform: meshAnchor.transform,
+            vertices: vertices2D,
+            faces: faces2D,
+            colors: colors2D
+        )
+        
+        // Update statistics
+        DispatchQueue.main.async {
+            self.totalMeshesSent += 1
+            self.totalVerticesSent += vertexCount
+            self.sentMeshIdentifiers.insert(meshAnchor.identifier)
+        }
+    }
+    
+    /// Generate per-vertex colors based on face classifications
+    /// Server expects colors array to match vertices array (per-vertex colors)
+    /// ARMeshClassification values:
+    /// 0 = none, 1 = wall, 2 = floor, 3 = ceiling, 4 = table, 5 = seat, 6 = window, 7 = door
+    private func generateVertexColors(vertexCount: Int, faces: [[Int]], faceClassifications: [Int]?) -> [[Float]] {
+        // Color mapping for mesh classifications
+        let classificationColors: [[Float]] = [
+            [0.5, 0.5, 0.5],    // 0: none - gray
+            [0.8, 0.8, 0.9],    // 1: wall - light blue-gray
+            [0.6, 0.5, 0.4],    // 2: floor - brown
+            [0.9, 0.9, 0.85],   // 3: ceiling - off-white
+            [0.6, 0.4, 0.3],    // 4: table - wood brown
+            [0.4, 0.6, 0.8],    // 5: seat - blue
+            [0.7, 0.9, 1.0],    // 6: window - light blue
+            [0.5, 0.35, 0.25]   // 7: door - dark wood
+        ]
+        
+        // Default color (gray) for all vertices
+        let defaultColor: [Float] = [0.5, 0.5, 0.5]
+        var vertexColors: [[Float]] = Array(repeating: defaultColor, count: vertexCount)
+        
+        // If we have classifications, assign colors based on face classifications
+        // Each vertex gets the color of the first face that uses it
+        if let classifications = faceClassifications {
+            for (faceIndex, face) in faces.enumerated() {
+                let classIndex = classifications[safe: faceIndex] ?? 0
+                let color = classificationColors[safe: min(classIndex, classificationColors.count - 1)] ?? defaultColor
+                
+                // Assign this color to each vertex in the face
+                for vertexIndex in face {
+                    if vertexIndex >= 0 && vertexIndex < vertexCount {
+                        vertexColors[vertexIndex] = color
+                    }
+                }
+            }
+        }
+        
+        return vertexColors
+    }
+    
+    /// Extract vertices as 2D array for server: [[x,y,z], [x,y,z], ...]
+    private func extractVertices2D(from source: ARGeometrySource) -> [[Float]] {
+        let buffer = source.buffer
+        let count = source.count
+        let stride = source.stride
+        let offset = source.offset
+        let componentsPerVector = source.componentsPerVector
+        
+        var result: [[Float]] = []
+        result.reserveCapacity(count)
+        
+        let pointer = buffer.contents().advanced(by: offset)
+        
+        for i in 0..<count {
+            let vertexPointer = pointer.advanced(by: i * stride)
+            var vertex: [Float] = []
+            vertex.reserveCapacity(componentsPerVector)
+            
+            for j in 0..<componentsPerVector {
+                let value = vertexPointer.advanced(by: j * MemoryLayout<Float>.size).assumingMemoryBound(to: Float.self).pointee
+                vertex.append(value)
+            }
+            result.append(vertex)
+        }
+        
+        return result
+    }
+    
+    /// Extract faces as 2D array for server: [[i,j,k], [i,j,k], ...]
+    private func extractFaces2D(from element: ARGeometryElement) -> [[Int]] {
+        let buffer = element.buffer
+        let count = element.count
+        let indexCountPerPrimitive = element.indexCountPerPrimitive // Should be 3 for triangles
+        let bytesPerIndex = element.bytesPerIndex
+        
+        var result: [[Int]] = []
+        result.reserveCapacity(count)
+        
+        let pointer = buffer.contents()
+        
+        for i in 0..<count {
+            var face: [Int] = []
+            face.reserveCapacity(indexCountPerPrimitive)
+            
+            for j in 0..<indexCountPerPrimitive {
+                let indexOffset = (i * indexCountPerPrimitive + j) * bytesPerIndex
+                let indexPointer = pointer.advanced(by: indexOffset)
+                
+                // Handle different index sizes
+                if bytesPerIndex == 4 {
+                    let value = indexPointer.assumingMemoryBound(to: UInt32.self).pointee
+                    face.append(Int(value))
+                } else if bytesPerIndex == 2 {
+                    let value = indexPointer.assumingMemoryBound(to: UInt16.self).pointee
+                    face.append(Int(value))
+                }
+            }
+            result.append(face)
+        }
+        
+        return result
+    }
+    
+    /// Extract classification data from ARGeometrySource
+    private func extractClassifications(from source: ARGeometrySource, faceCount: Int) -> [Int] {
+        let buffer = source.buffer
+        let count = source.count
+        let stride = source.stride
+        let offset = source.offset
+        
+        var result: [Int] = []
+        result.reserveCapacity(count)
+        
+        let pointer = buffer.contents().advanced(by: offset)
+        
+        for i in 0..<count {
+            let classPointer = pointer.advanced(by: i * stride)
+            let value = classPointer.assumingMemoryBound(to: UInt8.self).pointee
+            result.append(Int(value))
+        }
+        
+        return result
+    }
+    
+    /// Send mesh update to server (format matches server expectations)
+    private func sendMeshUpdate(
+        identifier: UUID,
+        transform: simd_float4x4,
+        vertices: [[Float]],
+        faces: [[Int]],
+        colors: [[Float]]
+    ) {
+        guard let token = token else { return }
+        
+        // Server expects: anchorId, vertices (2D), faces (2D), colors (2D), transform (1D)
+        let message: [String: Any] = [
+            "type": "mesh_update",
+            "anchorId": identifier.uuidString,  // Server expects 'anchorId' not 'identifier'
+            "transform": flattenTransform(transform),
+            "vertices": vertices,
+            "faces": faces,
+            "colors": colors,
+            "t": Int(Date().timeIntervalSince1970),
+            "token": token
+        ]
+        
+        sendMessage(message)
     }
     
     // Log frame statistics periodically
@@ -801,4 +1108,13 @@ extension ScanController: ARSessionDelegate {
         }
     }
     
+}
+
+// MARK: - Safe Array Subscript Extension
+
+extension Array {
+    /// Safe subscript - returns nil if index is out of bounds
+    subscript(safe index: Index) -> Element? {
+        return indices.contains(index) ? self[index] : nil
+    }
 }

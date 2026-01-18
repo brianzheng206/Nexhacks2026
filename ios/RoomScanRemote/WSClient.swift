@@ -72,8 +72,16 @@ class WSClient {
         }
         
         // Disconnect existing connection if any (but preserve helloCompletion!)
-        logger.debug("Disconnecting any existing connection...")
-        disconnectInternal(clearCompletion: false)
+        // IMPORTANT: Only disconnect if we're not already connecting with the same parameters
+        // This prevents disconnecting a connection that's in progress
+        if let existingHost = currentHost, let existingPort = currentPort,
+           existingHost == trimmedHost && existingPort == port,
+           let existingToken = currentToken, existingToken == token {
+            logger.debug("Already connecting to same host/port/token - skipping disconnect")
+        } else {
+            logger.debug("Disconnecting any existing connection...")
+            disconnectInternal(clearCompletion: false)
+        }
         
         let session = URLSession(configuration: .default)
         webSocketTask = session.webSocketTask(with: url)

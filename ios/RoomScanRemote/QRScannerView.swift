@@ -71,6 +71,11 @@ class QRScannerViewController: UIViewController {
     var captureSession: AVCaptureSession?
     var previewLayer: AVCaptureVideoPreviewLayer?
     
+    // Track last scanned value to prevent duplicate scans
+    private var lastScannedValue: String?
+    private var lastScanTime: Date?
+    private let scanDebounceInterval: TimeInterval = 1.0 // Ignore duplicate scans within 1 second
+    
     override func viewDidLoad() {
         super.viewDidLoad()
         
@@ -245,32 +250,47 @@ class QRScannerViewController: UIViewController {
 }
 
 extension QRScannerViewController: AVCaptureMetadataOutputObjectsDelegate {
+    // Track last scanned value to prevent duplicate scans
+    private var lastScannedValue: String?
+    private var lastScanTime: Date?
+    private let scanDebounceInterval: TimeInterval = 1.0 // Ignore duplicate scans within 1 second
+    
     func metadataOutput(_ output: AVCaptureMetadataOutput, didOutput metadataObjects: [AVMetadataObject], from connection: AVCaptureConnection) {
-        if let metadataObject = metadataObjects.first {
-            guard let readableObject = metadataObject as? AVMetadataMachineReadableCodeObject else { return }
-            guard let stringValue = readableObject.stringValue else { return }
-            
-            // Stop scanning
-            captureSession?.stopRunning()
-            
-            // Parse QR code
-            let (token, host, port, error) = parseQRCode(stringValue)
-            
-            if error == nil && token != nil {
-                // Success - provide haptic feedback
-                let generator = UINotificationFeedbackGenerator()
-                generator.notificationOccurred(.success)
-                
-                // Also vibrate for older devices
-                AudioServicesPlaySystemSound(SystemSoundID(kSystemSoundID_Vibrate))
-            } else {
-                // Error - provide error haptic feedback
-                let generator = UINotificationFeedbackGenerator()
-                generator.notificationOccurred(.error)
-            }
-            
-            // Notify delegate
-            delegate?.didScanQRCode(token: token, host: host, port: port, error: error)
+        guard let metadataObject = metadataObjects.first else { return }
+        guard let readableObject = metadataObject as? AVMetadataMachineReadableCodeObject else { return }
+        guard let stringValue = readableObject.stringValue else { return }
+        
+        // Debounce: Ignore duplicate scans within debounce interval
+        let now = Date()
+        if let lastValue = lastScannedValue, lastValue == stringValue,
+           let lastTime = lastScanTime, now.timeIntervalSince(lastTime) < scanDebounceInterval {
+            logger.debug("Ignoring duplicate QR scan (debounced)")
+            return
         }
+        
+        lastScannedValue = stringValue
+        lastScanTime = now
+        
+        // Stop scanning to prevent multiple detections
+        captureSession?.stopRunning()
+        
+        // Parse QR code
+        let (token, host, port, error) = parseQRCode(stringValue)
+        
+        if error == nil && token != nil {
+            // Success - provide haptic feedback
+            let generator = UINotificationFeedbackGenerator()
+            generator.notificationOccurred(.success)
+            
+            // Also vibrate for older devices
+            AudioServicesPlaySystemSound(SystemSoundID(kSystemSoundID_Vibrate))
+        } else {
+            // Error - provide error haptic feedback
+            let generator = UINotificationFeedbackGenerator()
+            generator.notificationOccurred(.error)
+        }
+        
+        // Notify delegate (only once per unique scan)
+        delegate?.didScanQRCode(token: token, host: host, port: port, error: error)
     }
 }

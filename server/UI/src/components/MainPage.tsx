@@ -41,6 +41,9 @@ export default function MainPage() {
   const [previewImageSrc, setPreviewImageSrc] = useState<string | null>(null);
   const [downloadUrl, setDownloadUrl] = useState<string | null>(null);
   const [floorplanData, setFloorplanData] = useState<any[]>([]);
+  const [roomDoors, setRoomDoors] = useState<any[]>([]);
+  const [roomWindows, setRoomWindows] = useState<any[]>([]);
+  const [roomObjects, setRoomObjects] = useState<any[]>([]);
   const [isScanning, setIsScanning] = useState(false);
   const [roomStats, setRoomStats] = useState<any>(null);
   const [meshData, setMeshData] = useState<Map<string, any>>(new Map()); // Store mesh anchors by ID
@@ -181,6 +184,9 @@ export default function MainPage() {
               setFloorplanData(d.walls);
               setIsScanning(true); // Show scanning indicator when walls are being detected
             }
+            if (Array.isArray(d.doors)) setRoomDoors(d.doors);
+            if (Array.isArray(d.windows)) setRoomWindows(d.windows);
+            if (Array.isArray(d.objects)) setRoomObjects(d.objects);
           } else if (d.type === 'mesh_update') {
             // Handle detailed 3D mesh with colors
             if (d.anchorId && d.vertices && d.faces && d.colors) {
@@ -283,6 +289,9 @@ export default function MainPage() {
     setPreviewImageSrc(null);
     setDownloadUrl(null);
     setFloorplanData([]);
+    setRoomDoors([]);
+    setRoomWindows([]);
+    setRoomObjects([]);
     setIsScanning(false);
     setRoomStats(null);
     setMeshData(new Map());
@@ -435,8 +444,14 @@ export default function MainPage() {
               <div className="absolute inset-0 w-full h-full">
                 {meshData.size > 0 ? (
                   <Mesh3DViewer meshData={meshData} className="w-full h-full" />
-                ) : floorplanData.length > 0 ? (
-                  <RoomPlanViewer walls={floorplanData} className="w-full h-full" />
+                ) : floorplanData.length > 0 || roomObjects.length > 0 || roomDoors.length > 0 || roomWindows.length > 0 ? (
+                  <RoomPlanViewer
+                    walls={floorplanData}
+                    doors={roomDoors}
+                    windows={roomWindows}
+                    objects={roomObjects}
+                    className="w-full h-full"
+                  />
                 ) : (
                   <div className="w-full h-full flex items-center justify-center bg-black/50">
                     <div className="text-center">

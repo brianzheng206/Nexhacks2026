@@ -7,31 +7,58 @@
 
 import SwiftUI
 import RoomPlan
+import ARKit
 
 // MARK: - RoomCaptureView Wrapper for SwiftUI
 // Uses RoomCaptureView to display the AR session owned by ScanController.
-// Note: RoomCaptureView has its own internal session for display purposes.
-// ScanController owns and controls the RoomCaptureSession used for actual scanning.
+// Enables mesh reconstruction for detailed 3D geometry capture.
 
 struct RoomCaptureViewRepresentable: UIViewRepresentable {
     let scanController: ScanController
     
     func makeUIView(context: Context) -> RoomCaptureView {
-        // Create the view - RoomCaptureView will create its own internal session for display
-        // ScanController owns the actual RoomCaptureSession used for scanning
-        // The view's session is separate and used only for visualization
+        // Create the view - RoomCaptureView has its own internal session
         let roomCaptureView = RoomCaptureView(frame: .zero)
+        
+        // Connect ScanController to the view's session
+        if let session = roomCaptureView.captureSession {
+            // Set ScanController as delegate to receive scanning updates and mesh anchors
+            session.delegate = scanController
+            session.arSession.delegate = scanController
+            
+            // Store reference in ScanController so it can control the session
+            scanController.roomCaptureSession = session
+            
+            // Try to enable mesh reconstruction on the ARSession
+            // Note: This may not work if the session is already running with a different configuration
+            enableMeshReconstruction(on: session.arSession)
+        }
+        
         return roomCaptureView
     }
     
     func updateUIView(_ uiView: RoomCaptureView, context: Context) {
-        // RoomCaptureView manages its own internal session for display
-        // ScanController's session (roomCaptureSession) is the single source of truth for scanning logic
-        // We don't need to sync them - the view's session is just for visualization
-        // ScanController's session handles all the actual scanning, delegate callbacks, and data
+        // Ensure the session is still connected
+        if let session = uiView.captureSession, session.delegate !== scanController {
+            session.delegate = scanController
+            session.arSession.delegate = scanController
+            scanController.roomCaptureSession = session
+        }
+    }
+    
+    /// Attempt to enable mesh reconstruction on an existing ARSession
+    private func enableMeshReconstruction(on arSession: ARSession) {
+        // Check if mesh reconstruction is supported
+        guard ARWorldTrackingConfiguration.supportsSceneReconstruction(.meshWithClassification) else {
+            // Mesh reconstruction not supported - RoomPlan will still provide parametric data
+            return
+        }
         
-        // No action needed here - ScanController manages its session independently
-        // The view will display its own session's AR feed, which is fine for visualization
+        // Note: We cannot reconfigure an ARSession that's managed by RoomCaptureView
+        // The mesh reconstruction must be enabled before the session starts
+        // This is a limitation when using RoomCaptureView - for full mesh control,
+        // you would need to use a custom ARView with RoomCaptureSession(arSession:)
+        // ARSession will receive mesh anchors if RoomPlan enables them internally
     }
 }
 
@@ -94,14 +121,10 @@ struct ScanView: View {
                 
                 // 3D Room Capture View - takes up most of the screen
                 ZStack {
-                    if scanController.isScanning {
-                        // Show the RoomPlan live reconstruction view.
-                        RoomCaptureViewRepresentable(scanController: scanController)
-                            .ignoresSafeArea(edges: .horizontal)
-                    } else {
-                        // Placeholder when not scanning
-                        ScanPlaceholderView()
-                    }
+                    // Always show RoomCaptureView to display camera feed
+                    // The view will show the camera feed even when not actively scanning
+                    RoomCaptureViewRepresentable(scanController: scanController)
+                        .ignoresSafeArea(edges: .horizontal)
                     
                     // Overlay status indicator
                     VStack {
