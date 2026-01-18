@@ -41,9 +41,23 @@ class WSClient {
         logger.info("Host: \(laptopHost), Port: \(port), Token length: \(token.count)")
         
         let trimmedHost = laptopHost.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedToken = token.trimmingCharacters(in: .whitespacesAndNewlines)
+        
         guard !trimmedHost.isEmpty else {
             logger.error("Invalid server address - empty host")
             completion(false, "Invalid server address")
+            return
+        }
+        
+        // If already connected with same credentials, return success immediately
+        if isConnected,
+           let existingHost = currentHost, existingHost == trimmedHost,
+           let existingPort = currentPort, existingPort == port,
+           let existingToken = currentToken, existingToken == trimmedToken {
+            logger.info("Already connected with same credentials - returning success")
+            DispatchQueue.main.async {
+                completion(true, nil)
+            }
             return
         }
 
@@ -52,10 +66,16 @@ class WSClient {
         helloAckTimeoutTimer?.invalidate()
         connectionTimeoutTimer = nil
         helloAckTimeoutTimer = nil
+        
+        // Disconnect existing connection if credentials changed
+        if currentHost != nil || currentPort != nil || currentToken != nil {
+            logger.debug("Disconnecting existing connection (credentials changed)...")
+            disconnectInternal(clearCompletion: false)
+        }
 
         currentHost = trimmedHost
         currentPort = port
-        currentToken = token
+        currentToken = trimmedToken
         helloCompletion = completion
         isWaitingForHelloAck = false
         
@@ -66,15 +86,6 @@ class WSClient {
             logger.error("Invalid WebSocket URL: \(urlString)")
             completion(false, "Invalid WebSocket URL")
             return
-        }
-        
-        if let existingHost = currentHost, let existingPort = currentPort,
-           existingHost == trimmedHost && existingPort == port,
-           let existingToken = currentToken, existingToken == token {
-            logger.debug("Already connecting to same host/port/token - skipping disconnect")
-        } else {
-            logger.debug("Disconnecting any existing connection...")
-            disconnectInternal(clearCompletion: false)
         }
         
         let session = URLSession(configuration: .default)

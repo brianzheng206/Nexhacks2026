@@ -159,10 +159,14 @@ wss.on('connection', (ws, req) => {
   // Handle incoming messages
   ws.on('message', (data, isBinary) => {
     if (isBinary) {
-      // Binary messages no longer used - mesh is displayed via HTTP polling instead of JPEG streaming
-      // Ignore binary messages to reduce server load
-      if (role === 'phone' && token) {
-        // Silently ignore - no longer relaying JPEG frames
+      // Relay binary messages (JPEG frames) from phone to UI clients
+      if (role === 'phone' && token && session) {
+        // Relay JPEG frame to all UI clients
+        session.uiWsSet.forEach((uiWs) => {
+          if (uiWs.readyState === WebSocket.OPEN) {
+            uiWs.send(data, { binary: true });
+          }
+        });
       }
     } else {
       // Text message - handle protocol messages

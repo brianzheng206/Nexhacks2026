@@ -691,36 +691,53 @@ extension ScanController: ARSessionDelegate {
     }
     
     private func processMeshAnchor(_ meshAnchor: ARMeshAnchor) {
-        let geometry = meshAnchor.geometry
-        
-        let vertices2D = extractVertices2D(from: geometry.vertices)
-        let vertexCount = vertices2D.count
-        let faces2D = extractFaces2D(from: geometry.faces)
-        
-        var faceClassifications: [Int]?
-        if let classificationSource = geometry.classification {
-            faceClassifications = extractClassifications(from: classificationSource, faceCount: geometry.faces.count)
-        }
-        
-        let colors2D = generateVertexColors(
-            vertexCount: vertexCount,
-            faces: faces2D,
-            faceClassifications: faceClassifications
-        )
-        
-        // Send mesh data in server-expected format
-        sendMeshUpdate(
-            identifier: meshAnchor.identifier,
-            transform: meshAnchor.transform,
-            vertices: vertices2D,
-            faces: faces2D,
-            colors: colors2D
-        )
-        
-        DispatchQueue.main.async {
-            self.totalMeshesSent += 1
-            self.totalVerticesSent += vertexCount
-            self.sentMeshIdentifiers.insert(meshAnchor.identifier)
+        // Wrap in autoreleasepool to ensure proper memory management of Metal buffers
+        autoreleasepool {
+            let geometry = meshAnchor.geometry
+            
+            let vertices2D = extractVertices2D(from: geometry.vertices)
+            let vertexCount = vertices2D.count
+            
+            // Skip empty meshes
+            guard vertexCount > 0 else {
+                logger.debug("Skipping empty mesh anchor: \(meshAnchor.identifier)")
+                return
+            }
+            
+            let faces2D = extractFaces2D(from: geometry.faces)
+            
+            // Skip if no faces
+            guard !faces2D.isEmpty else {
+                logger.debug("Skipping mesh with no faces: \(meshAnchor.identifier)")
+                return
+            }
+            
+            var faceClassifications: [Int]?
+            if let classificationSource = geometry.classification {
+                faceClassifications = extractClassifications(from: classificationSource, faceCount: geometry.faces.count)
+            }
+            
+            let colors2D = generateVertexColors(
+                vertexCount: vertexCount,
+                faces: faces2D,
+                faceClassifications: faceClassifications
+            )
+            
+            // Send mesh data in server-expected format
+            sendMeshUpdate(
+                identifier: meshAnchor.identifier,
+                transform: meshAnchor.transform,
+                vertices: vertices2D,
+                faces: faces2D,
+                colors: colors2D
+            )
+            
+            DispatchQueue.main.async { [weak self] in
+                guard let self = self else { return }
+                self.totalMeshesSent += 1
+                self.totalVerticesSent += vertexCount
+                self.sentMeshIdentifiers.insert(meshAnchor.identifier)
+            }
         }
     }
     

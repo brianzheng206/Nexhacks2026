@@ -135,6 +135,22 @@ struct ScanView: View {
             scanController.connectionManager = connectionManager
             
             setupWebSocketHandlers()
+            
+            // Ensure connection is established - reconnect if needed
+            if !connectionManager.isConnected {
+                connectionManager.connect(laptopHost: serverHost, port: serverPort, token: token) { success, error in
+                    if success {
+                        statusMessage = "Connected"
+                        wasConnected = true
+                    } else {
+                        reconnectError = error ?? "Connection failed"
+                        showReconnectAlert = true
+                    }
+                }
+            } else {
+                wasConnected = true
+            }
+            
             updateStatus()
             updateConnectionState()
         }
