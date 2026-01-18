@@ -7,7 +7,7 @@ When your iPhone is connected to your Mac via USB-C, you can use a local connect
 ## How It Works
 
 ### USB Connection Mode
-- **IP Address**: Uses `localhost` or `127.0.0.1`
+- **IP Address**: Use your Mac's USB network IP (often `172.20.10.x` or `169.254.x.x`)
 - **Network**: Direct USB connection (no WiFi needed)
 - **Benefits**: 
   - Faster data transfer
@@ -26,26 +26,25 @@ When your iPhone is connected to your Mac via USB-C, you can use a local connect
 
 ### On Mac (Laptop Server)
 
-1. **Start the server** (it will listen on `localhost:8080`):
+1. **Start the server** (it will listen on `0.0.0.0:8080`):
    ```bash
-   cd laptop/server
+   cd server
    npm start
    ```
 
 2. **The server automatically binds to `0.0.0.0`**, which means:
-   - Accessible via `localhost` (USB connection)
-   - Accessible via network IP (WiFi connection)
+   - Accessible via `localhost` on the Mac for local testing
+   - Accessible via USB or WiFi IP from the iOS device
    - Both work simultaneously!
 
 ### On iPhone (iOS App)
 
 1. **Connect iPhone to Mac via USB-C cable**
 
-2. **Open the Room Sensor app**
+2. **Open the RoomScan Remote app**
 
 3. **In Pairing screen:**
-   - Toggle **"Use USB-C Connection (Local)"** ON
-   - IP address field will auto-fill to `localhost`
+   - Enter your Mac's USB network IP (e.g., `172.20.10.2`)
    - Enter your session token
    - Tap "Connect"
 
@@ -59,32 +58,29 @@ When your iPhone is connected to your Mac via USB-C, you can use a local connect
 ```
 iPhone → USB-C Cable → Mac
     ↓
-WebSocket: ws://localhost:8080/ws?token=...
-HTTP: http://localhost:8080/upload/chunk
+WebSocket: ws://<usb-ip>:8080
+HTTP: http://<usb-ip>:8080/upload/usdz?token=...
 ```
 
 **WiFi Mode:**
 ```
 iPhone → WiFi → Router → Mac
     ↓
-WebSocket: ws://192.168.1.100:8080/ws?token=...
-HTTP: http://192.168.1.100:8080/upload/chunk
+WebSocket: ws://192.168.1.100:8080
+HTTP: http://192.168.1.100:8080/upload/usdz?token=...
 ```
 
 ### Server Configuration
 
 The server listens on `0.0.0.0:8080`, which means:
-- ✅ Accepts connections from `localhost` (USB)
+- ✅ Accepts connections from the Mac (localhost)
 - ✅ Accepts connections from network IP (WiFi)
 - ✅ Both work at the same time
 
 ### iOS Implementation
 
-- **Toggle**: Added to `PairingView.swift`
-- **Auto-detection**: When USB mode enabled, IP auto-fills to `localhost`
-- **Connection**: Uses `localhost` instead of network IP
-- **WebSocket**: Connects to `ws://localhost:8080`
-- **HTTP**: Uploads to `http://localhost:8080`
+- Enter the host manually on the Pairing screen
+- Use the same host for WebSocket and HTTP uploads
 
 ## Benefits of USB Connection
 
@@ -124,32 +120,26 @@ The server listens on `0.0.0.0:8080`, which means:
    - Look for iPhone in Finder (Mac)
    - Check if charging indicator shows
 
-3. **Try `127.0.0.1` instead of `localhost`**:
-   - Some network configurations prefer IP address
-   - Manually enter `127.0.0.1` in IP field
+3. **Check the Mac's USB IP**:
+   - System Settings → Network → iPhone USB (or similar)
+   - Use that IP in the app
 
 4. **Check firewall**:
-   - Mac firewall might block localhost connections
+   - Mac firewall might block incoming connections on port 8080
    - Temporarily disable to test
 
-### Server Not Accessible via localhost
+### Server Not Accessible via USB IP
 
 The server should bind to `0.0.0.0` by default, which allows:
-- `localhost` connections
+- USB IP connections
 - Network IP connections
 
 If it's only binding to `127.0.0.1`, check server configuration.
 
 ## Code Changes Made
 
-### iOS App (`PairingView.swift`)
-- Added `useUSBConnection` toggle
-- Auto-fills `localhost` when USB mode enabled
-- Disables IP field when USB mode active
-- Uses `localhost` for connection when USB mode enabled
-
 ### Server
-- Already configured to accept both localhost and network connections
+- Already configured to accept both local and network connections
 - No changes needed (listens on `0.0.0.0`)
 
 ## Performance Comparison

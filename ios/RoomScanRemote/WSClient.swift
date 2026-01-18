@@ -9,7 +9,7 @@ import Foundation
 
 private let logger = AppLogger.websocket
 
-class WSClient {
+class WSClient: NSObject, URLSessionWebSocketDelegate {
     static let shared = WSClient()
     
     private var webSocketTask: URLSessionWebSocketTask?
@@ -114,21 +114,19 @@ class WSClient {
             return
         }
         
-        let session = URLSession(configuration: .default)
+        // Create URLSession with delegate to get connection lifecycle events
+        let config = URLSessionConfiguration.default
+        let session = URLSession(configuration: config, delegate: self, delegateQueue: nil)
         webSocketTask = session.webSocketTask(with: url)
         urlSession = session
         
-        logger.info("Created URLSession and WebSocketTask")
+        logger.info("Created URLSession and WebSocketTask with delegate")
         shouldReceiveMessages = true
         logger.info(">>> Setting up receiveMessages() BEFORE resume()")
         receiveMessages()
         logger.info(">>> Calling webSocketTask.resume()...")
         webSocketTask?.resume()
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
-            guard let self = self else { return }
-            logger.info(">>> Sending hello after 0.2s delay...")
-            self.sendHello(token: trimmedToken)
-        }
+        // Don't send hello here - wait for delegate callback when socket is actually open
         
         logger.debug("Setting hello_ack timeout timer: \(helloAckTimeout)s")
         helloAckTimeoutTimer = Timer.scheduledTimer(withTimeInterval: helloAckTimeout, repeats: false) { [weak self] _ in
@@ -152,18 +150,22 @@ class WSClient {
         connectionTimeoutTimer = Timer.scheduledTimer(withTimeInterval: connectionTimeout, repeats: false) { [weak self] _ in
             guard let self = self else { return }
             self.connectionLock.lock()
-            defer { self.connectionLock.unlock() }
             
-            if !self.isConnected && self.helloCompletion != nil {
+            // Always timeout if we're still connecting and haven't received hello_ack
+            if !self.isConnected && (self.helloCompletion != nil || self.isConnecting) {
                 logger.error(">>> CONNECTION TIMEOUT - failed after \(self.connectionTimeout) seconds")
                 self.isConnecting = false
                 self.cleanupTimers()
                 let completion = self.helloCompletion
                 self.helloCompletion = nil
+                self.connectionLock.unlock()
+                
                 self.disconnectInternal(clearCompletion: false, releaseLock: false)
                 DispatchQueue.main.async {
                     completion?(false, "Connection timeout - unable to reach server")
                 }
+            } else {
+                self.connectionLock.unlock()
             }
         }
     }
@@ -375,9 +377,10 @@ class WSClient {
             helloCompletion = nil
             connectionLock.unlock()
             
-            // Start keepalive timer
+            // Start keepalive timer (doesn't need lock)
             startKeepalive()
             
+            // Call callbacks after unlocking to avoid deadlock
             stateCallback?(true)
             
             logger.debug("Calling helloCompletion callback...")
@@ -464,13 +467,13 @@ class WSClient {
     
     private func handleDisconnection() {
         connectionLock.lock()
-        defer { connectionLock.unlock() }
         
         logger.info(">>> handleDisconnection called")
         
         // Only handle if we were actually connected or connecting
         guard isConnected || isConnecting || helloCompletion != nil else {
             logger.debug(">>> handleDisconnection - already disconnected, ignoring")
+            connectionLock.unlock()
             return
         }
         
@@ -487,6 +490,7 @@ class WSClient {
         
         connectionLock.unlock()
         
+        // Call callbacks after unlocking to avoid deadlock
         stateCallback?(false)
         
         if let completion = completion {
@@ -531,13 +535,14 @@ class WSClient {
     
     func disconnect() {
         connectionLock.lock()
-        defer { connectionLock.unlock() }
         
         logger.info(">>> disconnect() called")
         disconnectInternal(clearCompletion: true, releaseLock: false)
         let stateCallback = onConnectionStateChanged
+        
         connectionLock.unlock()
         
+        // Call callback after unlocking to avoid deadlock
         stateCallback?(false)
     }
     
@@ -581,12 +586,122 @@ class WSClient {
     private func updateConnectionState(_ newState: Bool) {
         logger.debug("updateConnectionState: \(isConnected) -> \(newState)")
         
-        if Thread.isMainThread {
-            isConnected = newState
+        // Never use main.sync while holding lock - just set directly
+        // State updates will be dispatched to main thread by callers if needed
+        isConnected = newState
+    }
+    
+    // MARK: - URLSessionWebSocketDelegate
+    
+    func urlSession(_ session: URLSession, webSocketTask: URLSessionWebSocketTask, didOpenWithProtocol protocol: String?) {
+        logger.info("========== WEBSOCKET OPENED ==========")
+        logger.info("Protocol: \(protocol ?? "none")")
+        logger.info("Socket is ready - can now send hello message")
+        
+        connectionLock.lock()
+        let token = currentToken
+        let shouldSendHello = isConnecting && !isWaitingForHelloAck
+        
+        // If socket opened but we're not in connecting state, something went wrong
+        if !isConnecting && helloCompletion != nil {
+            logger.warn(">>> Socket opened but isConnecting is false - resetting state")
+            isConnecting = true
+        }
+        
+        connectionLock.unlock()
+        
+        if shouldSendHello, let token = token {
+            logger.info(">>> Socket is open - sending hello immediately...")
+            sendHello(token: token)
+        } else if let token = token {
+            // Try to send hello anyway if we have a token
+            logger.info(">>> Socket is open - sending hello (recovery attempt)...")
+            sendHello(token: token)
         } else {
-            DispatchQueue.main.sync {
-                isConnected = newState
+            logger.warn(">>> Socket opened but not sending hello - isConnecting: \(isConnecting), hasToken: \(token != nil), isWaitingForHelloAck: \(isWaitingForHelloAck)")
+        }
+    }
+    
+    func urlSession(_ session: URLSession, webSocketTask: URLSessionWebSocketTask, didCloseWith closeCode: URLSessionWebSocketTask.CloseCode, reason: Data?) {
+        let reasonString = reason.flatMap { String(data: $0, encoding: .utf8) } ?? "no reason"
+        let closeCodeName: String
+        switch closeCode {
+        case .invalid:
+            closeCodeName = "invalid"
+        case .normalClosure:
+            closeCodeName = "normalClosure"
+        case .goingAway:
+            closeCodeName = "goingAway"
+        case .protocolError:
+            closeCodeName = "protocolError"
+        case .unsupportedData:
+            closeCodeName = "unsupportedData"
+        case .noStatusReceived:
+            closeCodeName = "noStatusReceived"
+        case .abnormalClosure:
+            closeCodeName = "abnormalClosure"
+        case .invalidFramePayloadData:
+            closeCodeName = "invalidFramePayloadData"
+        case .policyViolation:
+            closeCodeName = "policyViolation"
+        case .messageTooBig:
+            closeCodeName = "messageTooBig"
+        case .mandatoryExtensionMissing:
+            closeCodeName = "mandatoryExtensionMissing"
+        case .internalServerError:
+            closeCodeName = "internalServerError"
+        @unknown default:
+            closeCodeName = "unknown(\(closeCode.rawValue))"
+        }
+        
+        logger.info("========== WEBSOCKET CLOSED ==========")
+        logger.info("Close code: \(closeCodeName) (\(closeCode.rawValue)), Reason: \(reasonString)")
+        
+        handleDisconnection()
+    }
+    
+    func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+        if let error = error {
+            logger.error("========== URLSESSION TASK ERROR ==========")
+            logger.error("Error: \(error.localizedDescription)")
+            if let urlError = error as? URLError {
+                logger.error("URLError code: \(urlError.code.rawValue), description: \(urlError.localizedDescription)")
+            }
+            
+            // If we're still connecting and get an error, call completion with failure
+            connectionLock.lock()
+            let wasConnecting = isConnecting
+            let completion = helloCompletion
+            helloCompletion = nil
+            isConnecting = false
+            connectionLock.unlock()
+            
+            if wasConnecting, let completion = completion {
+                let errorMsg: String
+                if let urlError = error as? URLError {
+                    switch urlError.code {
+                    case .notConnectedToInternet:
+                        errorMsg = "No internet connection"
+                    case .cannotConnectToHost:
+                        errorMsg = "Cannot connect to server. Check IP address and ensure server is running."
+                    case .timedOut:
+                        errorMsg = "Connection timed out"
+                    case .networkConnectionLost:
+                        errorMsg = "Network connection lost"
+                    case .dnsLookupFailed:
+                        errorMsg = "DNS lookup failed. Check server address."
+                    default:
+                        errorMsg = "Connection error: \(urlError.localizedDescription)"
+                    }
+                } else {
+                    errorMsg = "Connection failed: \(error.localizedDescription)"
+                }
+                
+                DispatchQueue.main.async {
+                    completion(false, errorMsg)
+                }
             }
         }
+        // The didCloseWith delegate method will also handle disconnection if needed
     }
 }

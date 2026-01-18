@@ -146,6 +146,22 @@ class ScanController: NSObject, ObservableObject {
     private var lastMeshUpdateTime: TimeInterval = 0
     private let meshUpdateInterval: TimeInterval = 0.5
     private let meshProcessingQueue = DispatchQueue(label: "com.roomscan.meshProcessing", qos: .userInitiated)
+    private let meshProcessingLock = NSLock()
+    private var _isProcessingMesh = false
+    private var isProcessingMesh: Bool {
+        get {
+            meshProcessingLock.lock()
+            defer { meshProcessingLock.unlock() }
+            return _isProcessingMesh
+        }
+        set {
+            meshProcessingLock.lock()
+            defer { meshProcessingLock.unlock() }
+            _isProcessingMesh = newValue
+        }
+    }
+    private let maxAnchorsPerUpdate = 10
+    private let maxVerticesPerMesh = 60000
     private var sentMeshIdentifiers = Set<UUID>()
     private var totalMeshesSent: Int = 0
     private var totalVerticesSent: Int = 0
@@ -311,10 +327,12 @@ class ScanController: NSObject, ObservableObject {
         
         customARSession?.pause()
         customARSession = nil
+        currentFrame = nil
         updateStateOnMain(isScanning: false, roomCaptureSession: nil)
         
         // Clean up frame processing state
         isProcessingFrame = false
+        isProcessingMesh = false
         
         // Clean up frame timestamps to free memory
         frameTimestamps.removeAll()
@@ -717,48 +735,46 @@ extension ScanController: ARSessionDelegate {
         let pixelBuffer = frame.capturedImage
         let cameraTransform = frame.camera.transform
         
-        // Retain the pixel buffer for the async operation
-        CVPixelBufferRetain(pixelBuffer)
+        // Note: CVPixelBuffer is automatically memory-managed in Swift
+        // No need for manual retain/release
         
         frameProcessingQueue.async { [weak self] in
-            // Release the pixel buffer when done
-            defer {
-                CVPixelBufferRelease(pixelBuffer)
-            }
             
             guard let self = self else { return }
             
-            defer {
-                self.isProcessingFrame = false
-            }
-            
-            // Check if still scanning before processing
-            guard self.isScanning else { return }
-            
-            guard let jpegData = self.convertPixelBufferToJPEG(pixelBuffer, cameraTransform: cameraTransform) else {
+            autoreleasepool {
+                defer {
+                    self.isProcessingFrame = false
+                }
+                
+                // Check if still scanning before processing
+                guard self.isScanning else { return }
+                
+                guard let jpegData = self.convertPixelBufferToJPEG(pixelBuffer, cameraTransform: cameraTransform) else {
+                    DispatchQueue.main.async { [weak self] in
+                        self?.totalFramesDropped += 1
+                        self?.logStatisticsIfNeeded()
+                    }
+                    return
+                }
+                
+                let accepted: Bool
+                if let connectionManager = self.connectionManager {
+                    accepted = connectionManager.sendJPEGFrame(jpegData)
+                } else {
+                    accepted = WSClient.shared.sendJPEGFrame(jpegData)
+                }
+                
+                if !accepted {
+                    DispatchQueue.main.async { [weak self] in
+                        self?.totalFramesDropped += 1
+                        frameLogger.debug("Warning: Frame rejected by WebSocket despite canAcceptFrame check")
+                    }
+                }
+                
                 DispatchQueue.main.async { [weak self] in
-                    self?.totalFramesDropped += 1
                     self?.logStatisticsIfNeeded()
                 }
-                return
-            }
-            
-            let accepted: Bool
-            if let connectionManager = self.connectionManager {
-                accepted = connectionManager.sendJPEGFrame(jpegData)
-            } else {
-                accepted = WSClient.shared.sendJPEGFrame(jpegData)
-            }
-            
-            if !accepted {
-                DispatchQueue.main.async { [weak self] in
-                    self?.totalFramesDropped += 1
-                    frameLogger.debug("Warning: Frame rejected by WebSocket despite canAcceptFrame check")
-                }
-            }
-            
-            DispatchQueue.main.async { [weak self] in
-                self?.logStatisticsIfNeeded()
             }
         }
     }
@@ -777,24 +793,37 @@ extension ScanController: ARSessionDelegate {
     private func processMeshAnchors(_ anchors: [ARAnchor]) {
         guard isScanning else { return }
         
+        let isConnected: Bool
+        if let connectionManager = connectionManager {
+            isConnected = connectionManager.isConnected
+        } else {
+            isConnected = WSClient.shared.isConnected
+        }
+        guard isConnected else { return }
+        
         // Throttle mesh updates to avoid flooding the network
         let currentTime = Date().timeIntervalSince1970
         guard currentTime - lastMeshUpdateTime >= meshUpdateInterval else { return }
+        
+        guard !isProcessingMesh else { return }
         
         // Filter for mesh anchors only
         let meshAnchors = anchors.compactMap { $0 as? ARMeshAnchor }
         guard !meshAnchors.isEmpty else { return }
         
         lastMeshUpdateTime = currentTime
+        isProcessingMesh = true
         
         // Limit number of mesh anchors processed per update to prevent memory pressure
-        // Increased from 5 to 20 for better coverage
-        let maxAnchorsPerUpdate = 20
         let anchorsToProcess = Array(meshAnchors.prefix(maxAnchorsPerUpdate))
         
         // Process mesh anchors on background queue
         meshProcessingQueue.async { [weak self] in
             guard let self = self else { return }
+            
+            defer {
+                self.isProcessingMesh = false
+            }
             
             // Check if still scanning before processing
             guard self.isScanning else { return }
@@ -829,10 +858,8 @@ extension ScanController: ARSessionDelegate {
             }
             
             // Limit mesh size to prevent memory issues
-            // Increased to 100,000 for more detail
-            let maxVertices = 100000
-            guard vertexCount <= maxVertices else {
-                logger.debug("Skipping oversized mesh: \(vertexCount) vertices (max: \(maxVertices))")
+            guard vertexCount <= maxVerticesPerMesh else {
+                logger.debug("Skipping oversized mesh: \(vertexCount) vertices (max: \(maxVerticesPerMesh))")
                 return
             }
             
@@ -917,9 +944,9 @@ extension ScanController: ARSessionDelegate {
         
         let camera = frame.camera
         
-        // Use .right orientation as capturedImage is usually landscape (native sensor)
-        // Projecting with .right matches the buffer layout (0,0 is top-left of buffer)
-        let orientation: UIInterfaceOrientation = .right
+        // Use .landscapeRight orientation as capturedImage is usually landscape (native sensor)
+        // Projecting with .landscapeRight matches the buffer layout (0,0 is top-left of buffer)
+        let orientation: UIInterfaceOrientation = .landscapeRight
         let viewportSize = CGSize(width: 1, height: 1) // Normalized coordinates
         
         var colors: [[Float]] = []
@@ -939,28 +966,44 @@ extension ScanController: ARSessionDelegate {
             if projectedPoint.x >= 0 && projectedPoint.x < 1 && projectedPoint.y >= 0 && projectedPoint.y < 1 {
                 // Sample color from pixel buffer
                 // projectedPoint x,y maps to pixel coordinates
-                let x = Int(projectedPoint.x * CGFloat(width))
-                let y = Int(projectedPoint.y * CGFloat(height))
+                let pixelX = Int(projectedPoint.x * CGFloat(width))
+                let pixelY = Int(projectedPoint.y * CGFloat(height))
+                
+                // Ensure pixel coordinates are within bounds
+                guard pixelX >= 0 && pixelX < width && pixelY >= 0 && pixelY < height else {
+                    colors.append([0.5, 0.5, 0.5])
+                    continue
+                }
                 
                 // Read Y (Luma) - plane 0
-                let yIndex = y * yBytesPerRow + x
+                let yIndex = pixelY * yBytesPerRow + pixelX
+                guard yIndex >= 0 && yIndex < (height * yBytesPerRow) else {
+                    colors.append([0.5, 0.5, 0.5])
+                    continue
+                }
                 let yValue = baseAddress.load(fromByteOffset: yIndex, as: UInt8.self)
                 
                 // Read UV (Chroma) - plane 1 - Subsampled 2x2 usually
-                let uvIndex = (y / 2) * uvBytesPerRow + (x / 2) * 2
+                let uvX = pixelX / 2
+                let uvY = pixelY / 2
+                let uvIndex = uvY * uvBytesPerRow + uvX * 2
+                guard uvIndex >= 0 && uvIndex + 1 < (height / 2 * uvBytesPerRow) else {
+                    colors.append([0.5, 0.5, 0.5])
+                    continue
+                }
                 let cbValue = uvBaseAddress.load(fromByteOffset: uvIndex, as: UInt8.self)
                 let crValue = uvBaseAddress.load(fromByteOffset: uvIndex + 1, as: UInt8.self)
                 
                 // Convert YCbCr to RGB
                 // Y is [16, 235], Cb/Cr are [16, 240] usually, or full range [0, 255]
                 // Assuming full range or close approximation
-                let y = Float(yValue)
+                let yLuma = Float(yValue)
                 let cb = Float(cbValue) - 128.0
                 let cr = Float(crValue) - 128.0
                 
-                let r = max(0, min(255, y + 1.402 * cr))
-                let g = max(0, min(255, y - 0.344136 * cb - 0.714136 * cr))
-                let b = max(0, min(255, y + 1.772 * cb))
+                let r = Float(max(0, min(255, yLuma + 1.402 * cr)))
+                let g = Float(max(0, min(255, yLuma - 0.344136 * cb - 0.714136 * cr)))
+                let b = Float(max(0, min(255, yLuma + 1.772 * cb)))
                 
                 colors.append([r / 255.0, g / 255.0, b / 255.0])
             } else {
@@ -1212,7 +1255,8 @@ extension ScanController: ARSessionDelegate {
     }
     
     private func detectImageOrientation(from pixelBuffer: CVPixelBuffer, cameraTransform: simd_float4x4) -> UIImage.Orientation {
-        if let orientationNumber = CVBufferCopyAttachment(pixelBuffer, kCGImagePropertyOrientation, nil) as? CFNumber {
+        if let orientationValue = CVBufferCopyAttachment(pixelBuffer, kCGImagePropertyOrientation, nil) {
+            let orientationNumber = orientationValue as CFNumber
             var orientationInt: Int32 = 0
             if CFNumberGetValue(orientationNumber, .sInt32Type, &orientationInt) {
                 switch orientationInt {

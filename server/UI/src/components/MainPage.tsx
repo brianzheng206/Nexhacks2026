@@ -9,6 +9,7 @@ import RoomPlanViewer from './RoomPlanViewer';
 
 const MAX_RECONNECT_ATTEMPTS = 10;
 const RECONNECT_DELAY = 3000;
+const MAX_MESH_ANCHORS = 200;
 
 // Animated background component
 function AnimatedBackground() {
@@ -205,6 +206,20 @@ export default function MainPage() {
                   transform: d.transform,
                   timestamp: d.t
                 });
+                if (updated.size > MAX_MESH_ANCHORS) {
+                  let oldestId: string | null = null;
+                  let oldestTime = Number.POSITIVE_INFINITY;
+                  updated.forEach((value, key) => {
+                    const ts = typeof value?.timestamp === 'number' ? value.timestamp : 0;
+                    if (ts < oldestTime) {
+                      oldestTime = ts;
+                      oldestId = key;
+                    }
+                  });
+                  if (oldestId) {
+                    updated.delete(oldestId);
+                  }
+                }
                 return updated;
               });
               setIsScanning(true);
@@ -293,6 +308,13 @@ export default function MainPage() {
       wsRef.current.send(JSON.stringify({ type: 'control', token, action }));
       setIsScanning(action === 'start');
     }
+  };
+
+  const buildPairingQuery = () => {
+    const params = new URLSearchParams();
+    if (token) params.set('token', token);
+    if (!isLoopback && primaryIP) params.set('host', primaryIP);
+    return params.toString();
   };
 
   // ========== LANDING PAGE ==========
@@ -455,14 +477,14 @@ export default function MainPage() {
           <div className="glass-card-strong rounded-2xl p-5">
             <p className="text-xs font-medium text-white/40 uppercase tracking-wider mb-4">Controls</p>
             <div className="grid grid-cols-2 gap-2">
-              <button onClick={() => sendControl('start')} disabled={!isConnected || !phoneConnected || isScanning} className="btn btn-success py-3">
-                <Play className="w-4 h-4" /> Start
-              </button>
-              <button onClick={() => sendControl('stop')} disabled={!isConnected || !phoneConnected || !isScanning} className="btn btn-danger py-3">
-                <Square className="w-4 h-4" /> Stop
-              </button>
-            </div>
-            <button onClick={() => navigate(`/pair?token=${token}`)} className="btn btn-secondary w-full mt-3 py-2">
+            <button onClick={() => sendControl('start')} disabled={!isConnected || !phoneConnected || isScanning} className="btn btn-success py-3">
+              <Play className="w-4 h-4" /> Start
+            </button>
+            <button onClick={() => sendControl('stop')} disabled={!isConnected || !phoneConnected || !isScanning} className="btn btn-danger py-3">
+              <Square className="w-4 h-4" /> Stop
+            </button>
+          </div>
+            <button onClick={() => navigate(`/pair?${buildPairingQuery()}`)} className="btn btn-secondary w-full mt-3 py-2">
               <Scan className="w-4 h-4" />
               QR Setup
             </button>

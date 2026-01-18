@@ -5,17 +5,31 @@ import { ArrowLeft, Copy, Check, Wifi, Server, Key, AlertCircle, Smartphone } fr
 export default function PairingPage() {
   const [searchParams] = useSearchParams();
   const existingToken = searchParams.get('token');
+  const requestedHost = searchParams.get('host');
   const [qrDataUrl, setQrDataUrl] = useState<string | null>(null);
   const [token, setToken] = useState<string | null>(null);
-  const [laptopIP, setLaptopIP] = useState('Loading...');
+  const [laptopIP, setLaptopIP] = useState<string | null>(null);
+  const [availableIPs, setAvailableIPs] = useState<string[]>([]);
+  const [isRefreshing, setIsRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [copiedToken, setCopiedToken] = useState(false);
   const [copiedIP, setCopiedIP] = useState(false);
   const navigate = useNavigate();
 
-  useEffect(() => {
-    const query = existingToken ? `?token=${encodeURIComponent(existingToken)}` : '';
-    fetch(`/new${query}`)
+  const ipOptions = Array.from(new Set([laptopIP, ...availableIPs].filter(Boolean) as string[]))
+    .filter(ip => ip !== 'localhost' && ip !== '127.0.0.1');
+
+  const buildQuery = (tokenValue?: string | null, hostValue?: string | null) => {
+    const params = new URLSearchParams();
+    if (tokenValue) params.set('token', tokenValue);
+    if (hostValue) params.set('host', hostValue);
+    const query = params.toString();
+    return query ? `?${query}` : '';
+  };
+
+  const fetchPairing = (tokenValue?: string | null, hostValue?: string | null) => {
+    const query = buildQuery(tokenValue ?? existingToken, hostValue ?? requestedHost);
+    return fetch(`/new${query}`)
       .then(res => {
         if (!res.ok) throw new Error('Failed');
         return res.json();
@@ -23,12 +37,16 @@ export default function PairingPage() {
       .then(data => {
         setQrDataUrl(data.qrDataUrl);
         setToken(data.token);
-        const url = new URL(data.url);
-        const host = window.location.hostname;
-        setLaptopIP(host === 'localhost' || host === '127.0.0.1' ? url.hostname : host);
-      })
+        setLaptopIP(data.laptopIP || null);
+        setAvailableIPs(Array.isArray(data.availableIPs) ? data.availableIPs : []);
+      });
+  };
+
+  useEffect(() => {
+    setError(null);
+    fetchPairing()
       .catch(e => setError(e.message));
-  }, [existingToken]);
+  }, [existingToken, requestedHost]);
 
   const handleBack = () => {
     navigate('/');
@@ -42,6 +60,20 @@ export default function PairingPage() {
     } else {
       setCopiedIP(true);
       setTimeout(() => setCopiedIP(false), 2000);
+    }
+  };
+
+  const handleHostSelect = async (host: string) => {
+    if (!token || host === laptopIP) return;
+    setIsRefreshing(true);
+    setError(null);
+    try {
+      await fetchPairing(token, host);
+    } catch (e) {
+      const message = e instanceof Error ? e.message : 'Failed to refresh pairing';
+      setError(message);
+    } finally {
+      setIsRefreshing(false);
     }
   };
 
@@ -96,11 +128,35 @@ export default function PairingPage() {
                 </div>
               </div>
               <div className="flex items-center justify-between gap-2 bg-black/30 rounded-xl px-4 py-3">
-                <code className="font-mono text-white/80">{laptopIP}:8080</code>
-                <button onClick={() => copy(`${laptopIP}:8080`, 'ip')} className="btn btn-ghost p-2">
+                <code className="font-mono text-white/80">{(laptopIP || 'Loading...')}:8080</code>
+                <button
+                  onClick={() => laptopIP && copy(`${laptopIP}:8080`, 'ip')}
+                  className="btn btn-ghost p-2"
+                  disabled={!laptopIP}
+                >
                   {copiedIP ? <Check className="w-4 h-4 text-green-400" /> : <Copy className="w-4 h-4" />}
                 </button>
               </div>
+              {ipOptions.length > 1 && (
+                <div className="mt-3">
+                  <p className="text-[10px] text-white/30 uppercase tracking-wider mb-2">Other IPs</p>
+                  <div className="flex flex-wrap gap-2">
+                    {ipOptions.map(ip => (
+                      <button
+                        key={ip}
+                        onClick={() => handleHostSelect(ip)}
+                        className={`px-2 py-1 rounded-lg text-xs font-mono transition-colors ${ip === laptopIP ? 'bg-white/15 text-white' : 'bg-black/30 text-white/60 hover:text-white'}`}
+                        disabled={isRefreshing}
+                      >
+                        {ip}
+                      </button>
+                    ))}
+                  </div>
+                  <p className="text-[10px] text-white/30 mt-2">
+                    Select the IP your iOS device can reach.
+                  </p>
+                </div>
+              )}
             </div>
 
             {/* Token */}

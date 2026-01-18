@@ -92,7 +92,7 @@ Expected output when connected:
 - **Cause**: Wrong IP address or server unreachable
 - **Fix**: 
   - Get correct IP: Check server logs or use `ip addr` on Linux
-  - Try `localhost` if using USB-C connection
+  - For USB-C, use the Mac's USB network IP (not `localhost`)
   - Verify server is listening on `0.0.0.0:8080` (not just `127.0.0.1`)
 
 #### Issue: "Device not showing as connected" on website

@@ -47,6 +47,9 @@ struct PairingView: View {
                         .keyboardType(.URL)
                         .autocapitalization(.none)
                         .disableAutocorrection(true)
+                        .onChange(of: serverAddress) { _, newValue in
+                            validateServerAddress(newValue)
+                        }
                 }
                 
                 VStack(alignment: .leading, spacing: 10) {
@@ -56,6 +59,9 @@ struct PairingView: View {
                         .textFieldStyle(RoundedBorderTextFieldStyle())
                         .autocapitalization(.none)
                         .disableAutocorrection(true)
+                        .onChange(of: token) { _, newValue in
+                            validateToken(newValue)
+                        }
                 }
                 
                 if let error = errorMessage {
@@ -162,38 +168,50 @@ struct PairingView: View {
     private func checkReachability(host: String, port: Int, completion: @escaping (Bool, String?) -> Void) {
         let urlString = "http://\(host):\(port)/health"
         guard let url = URL(string: urlString) else {
-            completion(false, "Invalid server URL")
+            DispatchQueue.main.async {
+                completion(false, "Invalid server URL")
+            }
             return
         }
         
         var request = URLRequest(url: url)
         request.httpMethod = "GET"
-        request.timeoutInterval = 3.0 // 3 second timeout for reachability check
+        request.timeoutInterval = 4.0 // 4 second timeout for reachability check
         
         let task = URLSession.shared.dataTask(with: request) { data, response, error in
             if let error = error {
                 if let urlError = error as? URLError {
+                    let errorMsg: String
                     switch urlError.code {
                     case .notConnectedToInternet:
-                        completion(false, "No internet connection")
+                        errorMsg = "No internet connection"
                     case .cannotConnectToHost, .timedOut:
-                        completion(false, "Cannot reach server. Check address and ensure server is running.")
+                        errorMsg = "Cannot reach server. Check address and ensure server is running."
                     case .dnsLookupFailed:
-                        completion(false, "DNS lookup failed. Check server address.")
+                        errorMsg = "DNS lookup failed. Check server address."
                     default:
-                        completion(false, "Server unreachable: \(urlError.localizedDescription)")
+                        errorMsg = "Server unreachable: \(urlError.localizedDescription)"
+                    }
+                    DispatchQueue.main.async {
+                        completion(false, errorMsg)
                     }
                 } else {
-                    completion(false, "Reachability check failed: \(error.localizedDescription)")
+                    DispatchQueue.main.async {
+                        completion(false, "Reachability check failed: \(error.localizedDescription)")
+                    }
                 }
                 return
             }
             
             // If we get any response (even 404), server is reachable
             if let httpResponse = response as? HTTPURLResponse {
-                completion(true, nil)
+                DispatchQueue.main.async {
+                    completion(true, nil)
+                }
             } else {
-                completion(true, nil) // Non-HTTP response still means server is reachable
+                DispatchQueue.main.async {
+                    completion(true, nil) // Non-HTTP response still means server is reachable
+                }
             }
         }
         
@@ -203,11 +221,17 @@ struct PairingView: View {
     private func connect() {
         guard !serverAddress.isEmpty, !token.isEmpty else {
             errorMessage = "Please enter both server address and token"
+            isConnecting = false
             return
         }
         
+        // Re-validate before connecting
+        validateServerAddress(serverAddress)
+        validateToken(token)
+        
         guard isServerAddressValid, isTokenValid else {
             errorMessage = "Please fix validation errors before connecting"
+            isConnecting = false
             return
         }
         
@@ -217,7 +241,8 @@ struct PairingView: View {
         
         isConnecting = true
         errorMessage = nil
-        hasAttemptedAutoConnect = false
+        // Don't reset hasAttemptedAutoConnect here - it should stay true if auto-connect was triggered
+        // This prevents multiple auto-connect attempts from the same QR scan
         
         guard let parsed = parseServerAddress(serverAddress) else {
             errorMessage = "Invalid server address. Use host or host:port."
@@ -234,7 +259,19 @@ struct PairingView: View {
             return
         }
         
-        checkReachability(host: parsed.host, port: parsed.port) { reachable, error in
+        // Add timeout for reachability check to prevent hanging
+        let reachabilityTimeout = DispatchWorkItem { [weak self] in
+            guard let self = self, self.isConnecting else { return }
+            self.isConnecting = false
+            self.errorMessage = "Connection timeout - server may be unreachable"
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 5.0, execute: reachabilityTimeout)
+        
+        checkReachability(host: parsed.host, port: parsed.port) { [weak self] reachable, error in
+            reachabilityTimeout.cancel()
+            
+            guard let self = self else { return }
+            
             if !reachable {
                 DispatchQueue.main.async {
                     self.isConnecting = false
@@ -243,8 +280,19 @@ struct PairingView: View {
                 return
             }
             
+            // Add a maximum timeout to ensure isConnecting is always reset
+            // This prevents getting stuck in "Connecting..." state
+            let maximumTimeout = DispatchWorkItem { [weak self] in
+                guard let self = self, self.isConnecting else { return }
+                self.isConnecting = false
+                self.errorMessage = "Connection timeout - please check your network and try again"
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 15.0, execute: maximumTimeout)
+            
             let wsClient = WSClient.shared
             wsClient.connect(laptopHost: parsed.host, port: parsed.port, token: trimmedToken) { success, error in
+                maximumTimeout.cancel()
+                
                 DispatchQueue.main.async {
                     if success {
                         self.connectionManager.connectionState = .connected
@@ -273,23 +321,33 @@ struct PairingView: View {
         // Apply scanned values immediately
         if let scannedTokenValue = scannedToken?.trimmingCharacters(in: .whitespacesAndNewlines), !scannedTokenValue.isEmpty {
             self.token = scannedTokenValue
+            // Validate token after setting
+            validateToken(scannedTokenValue)
         }
         if let host = scannedHost?.trimmingCharacters(in: .whitespacesAndNewlines), !host.isEmpty {
+            let address: String
             if let port = scannedPort {
-                serverAddress = "\(host):\(port)"
+                address = "\(host):\(port)"
             } else {
-                serverAddress = "\(host):\(defaultPort)"
+                address = "\(host):\(defaultPort)"
             }
+            self.serverAddress = address
+            // Validate server address after setting
+            validateServerAddress(address)
         }
         
-        // Debounce the auto-connect to wait for all values to be set
+        // Debounce the auto-connect to wait for all values to be set and validated
+        // Use slightly longer delay to ensure validation completes
         let task = DispatchWorkItem { [self] in
             DispatchQueue.main.async {
-                self.attemptAutoConnect()
+                // Double-check that we have both values before attempting
+                if !self.serverAddress.isEmpty && !self.token.isEmpty {
+                    self.attemptAutoConnect()
+                }
             }
         }
         autoConnectDebounceTask = task
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1, execute: task)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3, execute: task)
     }
     
     private func applyScannedValues() {
@@ -347,18 +405,30 @@ struct PairingView: View {
     private func attemptAutoConnect() {
         // Don't attempt if already connecting or navigating
         guard !isConnecting, !navigateToScan else {
+            logger.debug("Skipping auto-connect: isConnecting=\(isConnecting), navigateToScan=\(navigateToScan)")
             return
         }
         
         // Require both server address and token to be filled
         guard !serverAddress.isEmpty, !token.isEmpty else {
+            logger.debug("Skipping auto-connect: missing serverAddress or token")
+            return
+        }
+        
+        // Require validation to pass
+        guard isServerAddressValid, isTokenValid else {
+            logger.debug("Skipping auto-connect: validation failed")
             return
         }
         
         // Only attempt auto-connect once per QR scan
         guard !hasAttemptedAutoConnect else {
+            logger.debug("Skipping auto-connect: already attempted")
             return
         }
+        
+        logger.info("========== AUTO-CONNECT TRIGGERED ==========")
+        logger.info("Server: \(serverAddress), Token length: \(token.count)")
         
         hasAttemptedAutoConnect = true
         connect()
