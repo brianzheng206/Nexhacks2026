@@ -43,6 +43,7 @@ export default function MainPage() {
   const [isScanning, setIsScanning] = useState(false);
   const [roomStats, setRoomStats] = useState<any>(null);
   const [meshData, setMeshData] = useState<Map<string, any>>(new Map()); // Store mesh anchors by ID
+  const [laptopIP, setLaptopIP] = useState<string | null>(null);
 
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectAttemptsRef = useRef(0);
@@ -214,13 +215,21 @@ export default function MainPage() {
   }, [token]);
 
   useEffect(() => {
-    if (token) connectWebSocket();
+    if (token) {
+      connectWebSocket();
+      // Fetch laptop IP if not already set
+      if (!laptopIP) {
+        fetch('/new').then(r => r.json()).then(d => {
+          if (d.laptopIP) setLaptopIP(d.laptopIP);
+        }).catch(() => {});
+      }
+    }
     return () => {
       if (reconnectTimeoutRef.current) clearTimeout(reconnectTimeoutRef.current);
       wsRef.current?.close();
       if (previewImageSrc) URL.revokeObjectURL(previewImageSrc);
     };
-  }, [token, connectWebSocket, previewImageSrc]);
+  }, [token, connectWebSocket, previewImageSrc, laptopIP]);
 
   const createSession = async () => {
     try {
@@ -228,6 +237,7 @@ export default function MainPage() {
       if (!res.ok) throw new Error();
       const d = await res.json();
       setToken(d.token);
+      setLaptopIP(d.laptopIP);
       navigate(`/?token=${d.token}`);
     } catch {}
   };
@@ -321,10 +331,14 @@ export default function MainPage() {
           </div>
           <div className={`badge ${phoneConnected ? 'badge-success' : 'badge-warning'}`}>
             {phoneConnected ? <Wifi className="w-3 h-3" /> : <WifiOff className="w-3 h-3" />}
-            Device
+            {phoneConnected ? 'Device Connected' : 'No Device'}
           </div>
-          <div className="glass rounded-lg px-3 py-1.5 font-mono text-xs text-white/60">
-            {token.substring(0, 8)}
+          <div 
+            className="glass rounded-lg px-3 py-1.5 font-mono text-xs text-white/60 cursor-pointer hover:bg-white/10 transition-colors"
+            onClick={() => { navigator.clipboard.writeText(token || ''); }}
+            title={`Full token: ${token} (click to copy)`}
+          >
+            {token}
           </div>
         </div>
       </header>
@@ -372,7 +386,24 @@ export default function MainPage() {
                 <Square className="w-4 h-4" /> Stop
               </button>
             </div>
-            {!phoneConnected && isConnected && <p className="text-xs text-amber-400/80 mt-3">Waiting for device...</p>}
+            {!phoneConnected && isConnected && (
+              <div className="mt-3 p-3 rounded-lg bg-amber-500/10 border border-amber-500/20">
+                <p className="text-xs text-amber-400/80 font-medium mb-2">📱 Connect Your Device</p>
+                <div className="space-y-2 text-[10px] text-amber-400/70">
+                  <div className="flex gap-2">
+                    <span className="text-amber-400/50">IP:</span>
+                    <span className="font-mono bg-black/30 px-1 rounded">{laptopIP || window.location.hostname}</span>
+                  </div>
+                  <div className="flex gap-2">
+                    <span className="text-amber-400/50">Token:</span>
+                    <span className="font-mono bg-black/30 px-1 rounded break-all">{token}</span>
+                  </div>
+                </div>
+                <p className="text-[9px] text-amber-400/40 mt-2">
+                  Enter these on your iOS app to connect
+                </p>
+              </div>
+            )}
           </div>
 
           <div className="glass-card-strong rounded-2xl p-5 flex-1 flex flex-col min-h-0">

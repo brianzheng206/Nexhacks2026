@@ -45,7 +45,8 @@ if (process.env.NODE_ENV === 'development') {
         req.path.startsWith('/download') || 
         req.path.startsWith('/health') ||
         req.path.startsWith('/mesh') ||
-        req.path.startsWith('/pair')) {
+        req.path.startsWith('/pair') ||
+        req.path.startsWith('/debug')) {
       return next();
     }
     
@@ -187,9 +188,12 @@ wss.on('connection', (ws, req) => {
             return;
           }
 
-          token = message.token;
+          // Trim whitespace from token to handle copy-paste issues
+          token = message.token.trim();
           role = message.role;
           session = getOrCreateSession(token);
+          
+          console.log(`[WebSocket] Hello from ${role}: token="${token}" (length: ${token.length})`);
 
           if (role === 'phone') {
             // Only one phone connection per session
@@ -418,6 +422,29 @@ app.get('/health', (req, res) => {
     status: 'ok', 
     timestamp: new Date().toISOString(),
     activeSessions: sessions.size
+  });
+});
+
+// Debug endpoint - shows all active sessions (remove in production)
+app.get('/debug/sessions', (req, res) => {
+  const sessionList = [];
+  sessions.forEach((session, token) => {
+    sessionList.push({
+      token: token,
+      tokenTruncated: token.substring(0, 8) + '...',
+      phoneConnected: session.phoneWs !== null && session.phoneWs.readyState === 1,
+      phoneReadyState: session.phoneWs?.readyState ?? 'null',
+      uiClientsCount: session.uiWsSet.size,
+      hasUsdzFile: session.latestUsdzPath !== null
+    });
+  });
+  
+  console.log('[Debug] Current sessions:', JSON.stringify(sessionList, null, 2));
+  
+  res.json({
+    timestamp: new Date().toISOString(),
+    totalSessions: sessions.size,
+    sessions: sessionList
   });
 });
 
