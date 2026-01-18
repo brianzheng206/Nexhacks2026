@@ -698,12 +698,12 @@ extension ScanController: ARSessionDelegate {
         let cameraTransform = frame.camera.transform
         
         // Retain the pixel buffer for the async operation
-        CVPixelBufferRetain(pixelBuffer)
+       
         
         frameProcessingQueue.async { [weak self] in
             // Release the pixel buffer when done
             defer {
-                CVPixelBufferRelease(pixelBuffer)
+                
             }
             
             guard let self = self else { return }
@@ -1094,20 +1094,18 @@ extension ScanController: ARSessionDelegate {
     }
     
     private func detectImageOrientation(from pixelBuffer: CVPixelBuffer, cameraTransform: simd_float4x4) -> UIImage.Orientation {
-        if let orientationNumber = CVBufferCopyAttachment(pixelBuffer, kCGImagePropertyOrientation, nil) as? CFNumber {
-            var orientationInt: Int32 = 0
-            if CFNumberGetValue(orientationNumber, .sInt32Type, &orientationInt) {
-                switch orientationInt {
-                case 1: return .up
-                case 3: return .down
-                case 6: return .right
-                case 8: return .left
-                case 2: return .upMirrored
-                case 4: return .downMirrored
-                case 5: return .leftMirrored
-                case 7: return .rightMirrored
-                default: break
-                }
+        if let orientationValue = CVBufferCopyAttachment(pixelBuffer, kCGImagePropertyOrientation, nil) as? NSNumber {
+            let orientationInt = orientationValue.intValue
+            switch orientationInt {
+            case 1: return .up
+            case 3: return .down
+            case 6: return .right
+            case 8: return .left
+            case 2: return .upMirrored
+            case 4: return .downMirrored
+            case 5: return .leftMirrored
+            case 7: return .rightMirrored
+            default: break
             }
         }
         
@@ -1137,3 +1135,4 @@ extension Array {
         return indices.contains(index) ? self[index] : nil
     }
 }
+
